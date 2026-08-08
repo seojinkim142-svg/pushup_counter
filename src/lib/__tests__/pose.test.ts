@@ -321,6 +321,36 @@ describe('SideAngleRepCounter', () => {
   });
 });
 
+type AngleTriple = { proximal: Point; vertex: Point; distal: Point };
+
+/** Builds proximal/vertex/distal points whose angle at the vertex equals `angleDeg`, vertex fixed at the origin. */
+function jointAtAngle(angleDeg: number, score = 1): AngleTriple {
+  const rad = (angleDeg * Math.PI) / 180;
+  return {
+    vertex: point(0, 0, score),
+    proximal: point(1, 0, score),
+    distal: point(Math.cos(rad), Math.sin(rad), score),
+  };
+}
+
+function holdJointAngle(
+  counter: AngleRepCounter,
+  angleDeg: number,
+  config: AngleExerciseConfig,
+  startT: number,
+  frames = 8,
+  score = 1
+) {
+  let t = startT;
+  const joint = jointAtAngle(angleDeg, score);
+  let last = null as ReturnType<AngleRepCounter['update']>;
+  for (let i = 0; i < frames; i++) {
+    last = counter.update(joint, joint, t, config);
+    t += FRAME_DT_MS;
+  }
+  return { last, t };
+}
+
 describe('AngleRepCounter', () => {
   const config: AngleExerciseConfig = {
     id: 'pushup',
@@ -334,67 +364,116 @@ describe('AngleRepCounter', () => {
     upThreshold: 160,
   };
 
-  it('counts one rep on a full up -> down -> up cycle', () => {
+  it('returns null when neither side is confidently visible', () => {
     const counter = new AngleRepCounter();
+    const { last } = holdJointAngle(counter, 170, config, 0, 4, 0.2);
+    expect(last).toBeNull();
+  });
+
+  it('counts reps from just one visible limb, with the other completely absent', () => {
+    // The "other side" is effectively not detected (score ~0) — e.g. a
+    // one-arm curl where only one arm is ever in frame.
+    const counter = new AngleRepCounter();
+    const absent = jointAtAngle(170, 0);
     let t = 0;
     for (let i = 0; i < 8; i++) {
-      counter.update(170, t, config); // straight/up
+      counter.update(jointAtAngle(170), absent, t, config); // straight/up
       t += FRAME_DT_MS;
     }
     for (let i = 0; i < 8; i++) {
-      counter.update(80, t, config); // bent past downThreshold
+      counter.update(jointAtAngle(80), absent, t, config); // bent past downThreshold
       t += FRAME_DT_MS;
     }
     expect(counter.count).toBe(1);
     expect(counter.stage).toBe('down');
+  });
 
+  it('does not let a stationary second limb dilute a moving one (no averaging)', () => {
+    // Right arm stays straight (resting) the whole time while left curls —
+    // if the two were averaged instead of picking one side, the resting
+    // arm's ~170 would keep pulling the signal above downThreshold.
+    const counter = new AngleRepCounter();
+    const restingRight = jointAtAngle(170);
+    let t = 0;
     for (let i = 0; i < 8; i++) {
-      counter.update(170, t, config); // back up
+      counter.update(jointAtAngle(170), restingRight, t, config);
       t += FRAME_DT_MS;
     }
-    expect(counter.stage).toBe('up');
+    for (let i = 0; i < 8; i++) {
+      counter.update(jointAtAngle(80), restingRight, t, config); // left curls down
+      t += FRAME_DT_MS;
+    }
+    expect(counter.count).toBe(1);
+  });
+
+  it('counts one rep on a full up -> down -> up cycle', () => {
+    const counter = new AngleRepCounter();
+    let t = 0;
+    ({ t } = holdJointAngle(counter, 170, config, t)); // straight/up
+    ({ t } = holdJointAngle(counter, 80, config, t)); // bent past downThreshold
+    expect(counter.count).toBe(1);
+    expect(counter.stage).toBe('down');
+
+    holdJointAngle(counter, 170, config, t); // back up
     expect(counter.count).toBe(1);
   });
 
   it('does not count a shallow dip that never crosses downThreshold', () => {
     const counter = new AngleRepCounter();
-    let t = 0;
-    for (let i = 0; i < 8; i++) {
-      counter.update(130, t, config); // between thresholds the whole time
-      t += FRAME_DT_MS;
-    }
+    holdJointAngle(counter, 130, config, 0); // between thresholds the whole time
     expect(counter.count).toBe(0);
     expect(counter.stage).toBe('up');
   });
 
+  it('keeps tracking the selected side through small visibility fluctuations', () => {
+    const counter = new AngleRepCounter();
+    const straightLeft = jointAtAngle(170);
+    const bentRight = jointAtAngle(90);
+
+    // Left is clearly better at first, so it's selected.
+    counter.update(
+      { ...straightLeft, vertex: point(0, 0, 1) },
+      { ...bentRight, vertex: point(0, 0, 0.5) },
+      0,
+      config
+    );
+    // Right nudges slightly ahead next frame, but not past the switch
+    // margin — the tracked side should stay "left".
+    const second = counter.update(
+      { ...straightLeft, vertex: point(0, 0, 0.85) },
+      { ...bentRight, vertex: point(0, 0, 0.9) },
+      FRAME_DT_MS,
+      config
+    );
+    expect(second).not.toBeNull();
+    expect(second!.angle).toBeCloseTo(170, 0); // still reading the straight (left) side
+  });
+
   it('does not double-count a rapid bounce inside the debounce window', () => {
     const counter = new AngleRepCounter(100, 0, 100); // near-raw filter for precise timing
-    counter.update(170, 0, config);
+    const up = jointAtAngle(170);
+    const down = jointAtAngle(80);
+
+    counter.update(up, up, 0, config);
     // Counting happens on the down-crossing (up -> down), same as VerticalRepCounter.
-    const firstDown = counter.update(80, FRAME_DT_MS, config);
-    expect(firstDown.stage).toBe('down');
-    expect(firstDown.justCounted).toBe(true);
+    const firstDown = counter.update(down, down, FRAME_DT_MS, config);
+    expect(firstDown?.stage).toBe('down');
+    expect(firstDown?.justCounted).toBe(true);
     expect(counter.count).toBe(1);
 
-    counter.update(170, 2 * FRAME_DT_MS, config); // back up, re-arms the down-crossing
+    counter.update(up, up, 2 * FRAME_DT_MS, config); // back up, re-arms the down-crossing
     // Second down-crossing lands well under 400ms after the first count.
-    const secondDown = counter.update(80, 3 * FRAME_DT_MS, config);
-    expect(secondDown.stage).toBe('down');
-    expect(secondDown.justCounted).toBe(false); // debounce blocks the count
+    const secondDown = counter.update(down, down, 3 * FRAME_DT_MS, config);
+    expect(secondDown?.stage).toBe('down');
+    expect(secondDown?.justCounted).toBe(false); // debounce blocks the count
     expect(counter.count).toBe(1);
   });
 
-  it('reset() clears count, stage, and filter state', () => {
+  it('reset() clears count, stage, side selection, and filter state', () => {
     const counter = new AngleRepCounter();
     let t = 0;
-    for (let i = 0; i < 8; i++) {
-      counter.update(170, t, config);
-      t += FRAME_DT_MS;
-    }
-    for (let i = 0; i < 8; i++) {
-      counter.update(80, t, config);
-      t += FRAME_DT_MS;
-    }
+    ({ t } = holdJointAngle(counter, 170, config, t));
+    holdJointAngle(counter, 80, config, t);
     expect(counter.count).toBe(1);
 
     counter.reset();

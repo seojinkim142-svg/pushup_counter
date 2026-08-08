@@ -44,7 +44,7 @@ export const VISIBLE_LANDMARK_INDICES: number[] = Array.from(
   new Set(SKELETON_EDGES.flat())
 );
 
-export type ExerciseId = 'pushup' | 'squat';
+export type ExerciseId = 'pushup' | 'squat' | 'armCurlTest';
 
 interface BaseExerciseConfig {
   id: ExerciseId;
@@ -162,6 +162,23 @@ export const EXERCISES: Record<ExerciseId, ExerciseConfig> = {
     },
     postureHint: '카메라 옆쪽에 서서 엉덩이·무릎·발목이 다 보이게 해주세요',
   },
+  // Temporary tuning aid, not a real workout mode: counts a standing arm
+  // curl (shoulder-elbow-wrist angle) instead of a push-up/squat, so the
+  // counting pipeline (calibration, hysteresis, debounce, gauge) can be
+  // sanity-checked by just bending an arm while standing — no repeated
+  // getting down on the floor needed. Exercises the AngleRepCounter path,
+  // which push-up/squat don't currently use.
+  armCurlTest: {
+    id: 'armCurlTest',
+    label: '테스트(팔)',
+    signal: 'angle',
+    left: [KnownPoseLandmarks.leftShoulder, KnownPoseLandmarks.leftElbow, KnownPoseLandmarks.leftWrist],
+    right: [KnownPoseLandmarks.rightShoulder, KnownPoseLandmarks.rightElbow, KnownPoseLandmarks.rightWrist],
+    downThreshold: 90,
+    upThreshold: 150,
+    downLabel: '굽히는 중',
+    upLabel: '펴짐',
+  },
 };
 
 /** Angle at vertex `b`, formed by points a-b-c, in degrees (0-180). */
@@ -183,42 +200,6 @@ export function angleDegrees(
   if (abLen === 0 || cbLen === 0) return 180;
   const cos = Math.max(-1, Math.min(1, dot / (abLen * cbLen)));
   return (Math.acos(cos) * 180) / Math.PI;
-}
-
-/**
- * Averages a left/right joint angle, falling back to whichever side is
- * confidently visible. Returns null if neither side has all three
- * landmarks above MIN_KEYPOINT_SCORE.
- */
-export function averageAngleForSides(
-  points: Point[],
-  left: [number, number, number],
-  right: [number, number, number]
-): number | null {
-  const l = points[left[0]];
-  const lv = points[left[1]];
-  const ld = points[left[2]];
-  const r = points[right[0]];
-  const rv = points[right[1]];
-  const rd = points[right[2]];
-
-  const leftValid =
-    l.score > MIN_KEYPOINT_SCORE && lv.score > MIN_KEYPOINT_SCORE && ld.score > MIN_KEYPOINT_SCORE;
-  const rightValid =
-    r.score > MIN_KEYPOINT_SCORE && rv.score > MIN_KEYPOINT_SCORE && rd.score > MIN_KEYPOINT_SCORE;
-
-  if (leftValid && rightValid) {
-    const la = angleDegrees(l.x, l.y, lv.x, lv.y, ld.x, ld.y);
-    const ra = angleDegrees(r.x, r.y, rv.x, rv.y, rd.x, rd.y);
-    return (la + ra) / 2;
-  }
-  if (leftValid) return angleDegrees(l.x, l.y, lv.x, lv.y, ld.x, ld.y);
-  if (rightValid) return angleDegrees(r.x, r.y, rv.x, rv.y, rd.x, rd.y);
-  return null;
-}
-
-export function averageJointAngle(points: Point[], config: AngleExerciseConfig): number | null {
-  return averageAngleForSides(points, config.left, config.right);
 }
 
 /**
@@ -245,6 +226,13 @@ const UP_NORM_THRESHOLD = 0.3;
 // (a landmark jump that clears both zones almost instantly) registering as a
 // full rep. Comfortably faster than any real push-up/squat cadence.
 const MIN_REP_INTERVAL_MS = 400;
+// Only switch which side (left/right limb) is tracked if the other side's
+// visibility clears the currently-tracked side's by this much — otherwise
+// near-equal frame-to-frame scores flip the selected side back and forth,
+// resetting the angle filter on every flip and making the signal jumpy.
+// Also what makes single-limb use (e.g. only one arm in frame) stable: once
+// a side is locked in, a briefly-glimpsed/noisy other side won't steal it.
+const SIDE_SWITCH_MARGIN = 0.15;
 
 export type RepUpdate = { progress: number; stage: 'up' | 'down'; justCounted: boolean };
 
@@ -317,15 +305,22 @@ export class VerticalRepCounter {
   }
 }
 
+export type AngleTriple = { proximal: Point; vertex: Point; distal: Point };
+
 /**
  * Rep counter for the fixed-threshold `angle` signal — smooths the joint
  * angle with a One-Euro filter and applies the same MIN_REP_INTERVAL_MS
- * debounce as VerticalRepCounter/SideAngleRepCounter, so an exercise added
- * with this signal gets the same jitter/false-positive protections instead
- * of comparing a raw per-frame angle straight against the threshold.
+ * debounce as VerticalRepCounter/SideAngleRepCounter.
+ *
+ * Tracks a single side (left or right limb) rather than averaging both, with
+ * the same sticky side-selection as SideAngleRepCounter: only one limb needs
+ * to be in frame and moving (e.g. a one-arm curl) to drive the count. If both
+ * sides happened to be visible and averaged instead, a stationary second limb
+ * would dilute the signal and could keep it from ever reaching the threshold.
  */
 export class AngleRepCounter {
   private filter: OneEuroFilter;
+  private selectedSide: 'left' | 'right' | null = null;
   private lastCountTimestamp = -Infinity;
   stage: 'up' | 'down' = 'up';
   count = 0;
@@ -336,12 +331,49 @@ export class AngleRepCounter {
 
   reset(): void {
     this.filter.reset();
+    this.selectedSide = null;
     this.lastCountTimestamp = -Infinity;
     this.stage = 'up';
     this.count = 0;
   }
 
-  update(rawAngle: number, timestampMs: number, config: AngleExerciseConfig): RepUpdate {
+  update(
+    left: AngleTriple,
+    right: AngleTriple,
+    timestampMs: number,
+    config: AngleExerciseConfig
+  ): AngleRepUpdate | null {
+    const leftVis = Math.min(left.proximal.score, left.vertex.score, left.distal.score);
+    const rightVis = Math.min(right.proximal.score, right.vertex.score, right.distal.score);
+
+    let side: 'left' | 'right';
+    if (this.selectedSide === 'left' && leftVis >= rightVis - SIDE_SWITCH_MARGIN) {
+      side = 'left';
+    } else if (this.selectedSide === 'right' && rightVis >= leftVis - SIDE_SWITCH_MARGIN) {
+      side = 'right';
+    } else {
+      side = leftVis >= rightVis ? 'left' : 'right';
+    }
+    const chosen = side === 'left' ? left : right;
+    const chosenVis = side === 'left' ? leftVis : rightVis;
+
+    if (chosenVis < MIN_KEYPOINT_SCORE) return null;
+
+    if (side !== this.selectedSide) {
+      // Switched limbs — reset the filter so stale state from the other
+      // side doesn't leak into the newly selected one.
+      this.filter.reset();
+      this.selectedSide = side;
+    }
+
+    const rawAngle = angleDegrees(
+      chosen.proximal.x,
+      chosen.proximal.y,
+      chosen.vertex.x,
+      chosen.vertex.y,
+      chosen.distal.x,
+      chosen.distal.y
+    );
     const angle = this.filter.filter(rawAngle, timestampMs);
     const progress = angleToProgress(angle, config);
     let justCounted = false;
@@ -357,7 +389,7 @@ export class AngleRepCounter {
       this.stage = 'up';
     }
 
-    return { progress, stage: this.stage, justCounted };
+    return { angle, progress, stage: this.stage, justCounted };
   }
 }
 
@@ -373,11 +405,6 @@ const SIDE_ANGLE_MIN_CALIBRATION_RANGE = 20; // degrees
 const SIDE_ANGLE_DOWN_FRACTION = 0.3; // from the straight/top end
 const SIDE_ANGLE_UP_FRACTION = 0.15;
 const SIDE_ANGLE_DEPTH_FRACTION = 0.15; // from the bent/bottom end
-// Only switch which leg is tracked if the other side's visibility clears the
-// currently-tracked side's by this much — otherwise near-equal frame-to-frame
-// scores flip the selected side back and forth, resetting the angle filters
-// (see the reset below) on every flip and making the angle signal jumpy.
-const SIDE_SWITCH_MARGIN = 0.15;
 
 /**
  * Rep counter for a side-on camera view, driven by knee (hip-knee-ankle)

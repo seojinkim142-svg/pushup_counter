@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { Dimensions, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useCameraPermission, type CameraPosition } from 'react-native-vision-camera';
 import {
@@ -10,7 +10,7 @@ import {
   type PoseDetectionResultBundle,
   type ViewCoordinator,
 } from 'react-native-mediapipe';
-import Svg, { Circle, Line } from 'react-native-svg';
+import Svg, { Path } from 'react-native-svg';
 import {
   AngleRepCounter,
   EXERCISES,
@@ -19,7 +19,6 @@ import {
   SideAngleRepCounter,
   VISIBLE_LANDMARK_INDICES,
   VerticalRepCounter,
-  averageJointAngle,
   averageVisibleY,
   isPersonPresent,
   type ExerciseId,
@@ -40,7 +39,116 @@ const GAUGE_DOT_SIZE = 30;
 type Stage = 'up' | 'down';
 type ScreenPoint = { x: number; y: number; score: number };
 
-const EXERCISE_ORDER: ExerciseId[] = ['pushup', 'squat'];
+// armCurlTest is a temporary tuning aid (see its comment in pose.ts), not a
+// real workout mode — remove this tab once pushup/squat tuning is done.
+const EXERCISE_ORDER: ExerciseId[] = ['pushup', 'squat', 'armCurlTest'];
+
+const JOINT_RADIUS = 4;
+
+/**
+ * Builds one SVG path string for the whole skeleton (all edges as separate
+ * M/L subpaths) instead of one <Line> element per edge. On this device,
+ * committing ~24 individual react-native-svg host elements every update was
+ * itself the render bottleneck (confirmed by measuring rAF throughput with
+ * the skeleton removed: steady 60fps vs. ~10fps with it) — a single <Path>
+ * element is one native view no matter how many segments its `d` describes.
+ */
+function buildSkeletonEdgesPath(points: ScreenPoint[]): string {
+  let d = '';
+  for (const [a, b] of SKELETON_EDGES) {
+    const pa = points[a];
+    const pb = points[b];
+    if (!pa || !pb) continue;
+    if (pa.score < MIN_KEYPOINT_SCORE || pb.score < MIN_KEYPOINT_SCORE) continue;
+    d += `M${pa.x},${pa.y}L${pb.x},${pb.y}`;
+  }
+  return d;
+}
+
+/** Same idea as buildSkeletonEdgesPath, but for the joint dots (each a two-arc circle subpath). */
+function buildSkeletonJointsPath(points: ScreenPoint[], r: number): string {
+  let d = '';
+  for (const p of points) {
+    if (p.score <= MIN_KEYPOINT_SCORE) continue;
+    d += `M${p.x - r},${p.y}a${r},${r} 0 1,0 ${2 * r},0a${r},${r} 0 1,0 ${-2 * r},0`;
+  }
+  return d;
+}
+
+export type SkeletonOverlayHandle = { setTargetPoints: (points: ScreenPoint[]) => void };
+
+/**
+ * Isolates the highest-churn state (interpolated skeleton points, up to
+ * display refresh rate) in its own leaf component. Parent (CameraScreen)
+ * feeds new detections in imperatively via the ref instead of prop/state,
+ * so this component's frequent re-renders never touch the tabs, buttons,
+ * counter, or gauge — only these two <Path> elements re-render.
+ */
+const SkeletonOverlay = forwardRef<SkeletonOverlayHandle, { width: number; height: number }>(
+  function SkeletonOverlay({ width, height }, ref) {
+    const [points, setPoints] = useState<ScreenPoint[]>([]);
+    const prevRef = useRef<ScreenPoint[]>([]);
+    const prevTimestampRef = useRef(Date.now());
+    const targetRef = useRef<ScreenPoint[]>([]);
+    const targetTimestampRef = useRef(Date.now());
+    const settledRef = useRef(true);
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        setTargetPoints(newPoints: ScreenPoint[]) {
+          prevRef.current = targetRef.current;
+          prevTimestampRef.current = targetTimestampRef.current;
+          targetRef.current = newPoints;
+          targetTimestampRef.current = Date.now();
+          settledRef.current = false;
+        },
+      }),
+      []
+    );
+
+    // Renders at display refresh rate by interpolating between the last two
+    // detection results over the interval actually observed between them,
+    // instead of holding each result's position until the next one arrives.
+    useEffect(() => {
+      let frameId: number;
+
+      const tick = () => {
+        frameId = requestAnimationFrame(tick);
+        if (settledRef.current) return;
+
+        const prev = prevRef.current;
+        const target = targetRef.current;
+        if (prev.length !== target.length) {
+          // Person just appeared/disappeared — nothing to interpolate from.
+          setPoints(target);
+          settledRef.current = true;
+          return;
+        }
+
+        const duration = Math.max(1, targetTimestampRef.current - prevTimestampRef.current);
+        const t = Math.min(1, (Date.now() - targetTimestampRef.current) / duration);
+        setPoints(
+          target.map((p, i) => {
+            const from = prev[i];
+            return { x: from.x + (p.x - from.x) * t, y: from.y + (p.y - from.y) * t, score: p.score };
+          })
+        );
+        if (t >= 1) settledRef.current = true;
+      };
+
+      frameId = requestAnimationFrame(tick);
+      return () => cancelAnimationFrame(frameId);
+    }, []);
+
+    return (
+      <Svg width={width} height={height} style={StyleSheet.absoluteFill}>
+        <Path d={buildSkeletonEdgesPath(points)} stroke="#39FF88" strokeWidth={2.5} fill="none" />
+        <Path d={buildSkeletonJointsPath(points, JOINT_RADIUS)} fill="#39FF88" />
+      </Svg>
+    );
+  }
+);
 
 export default function CameraScreen() {
   const { hasPermission, requestPermission } = useCameraPermission();
@@ -50,7 +158,6 @@ export default function CameraScreen() {
   const [count, setCount] = useState(0);
   const [stage, setStage] = useState<Stage>('up');
   const [isTracking, setIsTracking] = useState(true);
-  const [screenPoints, setScreenPoints] = useState<ScreenPoint[]>([]);
   const [postureOk, setPostureOk] = useState(true);
   const [progress, setProgress] = useState<number | null>(null);
   const exerciseConfig = EXERCISES[exercise];
@@ -65,6 +172,7 @@ export default function CameraScreen() {
   const displacementCounterRef = useRef(new VerticalRepCounter());
   const sideAngleCounterRef = useRef(new SideAngleRepCounter());
   const angleCounterRef = useRef(new AngleRepCounter());
+  const skeletonRef = useRef<SkeletonOverlayHandle>(null);
 
   useEffect(() => {
     exerciseRef.current = exercise;
@@ -79,7 +187,7 @@ export default function CameraScreen() {
 
       const landmarks = result.results[0]?.landmarks[0] ?? [];
       if (landmarks.length === 0) {
-        setScreenPoints([]);
+        skeletonRef.current?.setTargetPoints([]);
         return;
       }
 
@@ -112,13 +220,23 @@ export default function CameraScreen() {
 
         if (validPosture) {
           if (config.signal === 'angle') {
-            const angle = averageJointAngle(pts, config);
-            if (angle != null) {
-              // Routed through AngleRepCounter (One-Euro filtered, debounced)
-              // rather than compared to the threshold directly, so this
-              // signal gets the same jitter/false-positive protections as
-              // the other two below.
-              const update = angleCounterRef.current.update(angle, Date.now(), config);
+            // Rotation doesn't matter for angle math, so raw sensor-space
+            // landmarks (pts) are fine here — same reasoning as sideAngle
+            // below. AngleRepCounter picks whichever side is confidently
+            // visible (with hysteresis) instead of averaging both, so only
+            // one limb needs to be in frame and moving.
+            const left = {
+              proximal: pts[config.left[0]],
+              vertex: pts[config.left[1]],
+              distal: pts[config.left[2]],
+            };
+            const right = {
+              proximal: pts[config.right[0]],
+              vertex: pts[config.right[1]],
+              distal: pts[config.right[2]],
+            };
+            const update = angleCounterRef.current.update(left, right, Date.now(), config);
+            if (update != null) {
               setProgress(update.progress);
               if (update.stage !== stageRef.current) {
                 stageRef.current = update.stage;
@@ -181,7 +299,9 @@ export default function CameraScreen() {
         setProgress(null);
       }
 
-      setScreenPoints(screenPts);
+      // Feed the child component imperatively (ref call, not state) so this
+      // update never re-renders CameraScreen itself — see SkeletonOverlay.
+      skeletonRef.current?.setTargetPoints(screenPts);
     },
     []
   );
@@ -195,10 +315,15 @@ export default function CameraScreen() {
     RunningMode.LIVE_STREAM,
     POSE_MODEL,
     {
-      // GPU delegate contends with CameraX's own GL-based preview pipeline
-      // on this device (glDrawArrays errors, "maxImages already acquired"
-      // backlog) — CPU delegate avoids that contention.
-      delegate: Delegate.CPU,
+      // CPU delegate previously avoided a documented GPU/CameraX preview
+      // conflict (glDrawArrays errors, "maxImages already acquired"
+      // backlog) on this device, but only reached ~5-9fps and dipped as
+      // low as 2fps — JS-side handling is <2ms/frame, so that ceiling is
+      // native inference throughput, not something fpsMode or JS can fix.
+      // On-device retest (2026-08, clean background) with GPU ran a
+      // steady 9-12fps over 45s with no errors, so switching back — if the
+      // old conflict resurfaces under real use, revert to Delegate.CPU.
+      delegate: Delegate.GPU,
       minPoseDetectionConfidence: 0.5,
       minPosePresenceConfidence: 0.5,
       minTrackingConfidence: 0.5,
@@ -264,30 +389,7 @@ export default function CameraScreen() {
           activeCamera={cameraPosition}
           resizeMode="cover"
         />
-        <Svg width={PREVIEW_SIZE} height={PREVIEW_SIZE} style={StyleSheet.absoluteFill}>
-          {SKELETON_EDGES.map(([a, b], i) => {
-            const pa = screenPoints[a];
-            const pb = screenPoints[b];
-            if (!pa || !pb) return null;
-            if (pa.score < MIN_KEYPOINT_SCORE || pb.score < MIN_KEYPOINT_SCORE) return null;
-            return (
-              <Line
-                key={`edge-${i}`}
-                x1={pa.x}
-                y1={pa.y}
-                x2={pb.x}
-                y2={pb.y}
-                stroke="#39FF88"
-                strokeWidth={2.5}
-              />
-            );
-          })}
-          {screenPoints.map((p, i) =>
-            p.score > MIN_KEYPOINT_SCORE ? (
-              <Circle key={`pt-${i}`} cx={p.x} cy={p.y} r={4} fill="#39FF88" />
-            ) : null
-          )}
-        </Svg>
+        <SkeletonOverlay ref={skeletonRef} width={PREVIEW_SIZE} height={PREVIEW_SIZE} />
         <Pressable style={styles.cameraSwitchButton} onPress={handleFlipCamera}>
           <Text style={styles.cameraSwitchButtonText}>카메라 전환</Text>
         </Pressable>
