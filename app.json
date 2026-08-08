@@ -7,7 +7,10 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "$(PRODUCT_NAME)이(가) 푸시업 개수를 세기 위해 카메라를 사용합니다."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -16,10 +19,24 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA"
+      ],
+      "package": "com.anonymous.push_up_counter"
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "$(PRODUCT_NAME)이(가) 푸시업 개수를 세기 위해 카메라를 사용합니다.",
+          "enableCodeScanner": false
+        }
+      ],
+      "./plugins/withMediaPipeModel.js"
+    ]
   }
 }
