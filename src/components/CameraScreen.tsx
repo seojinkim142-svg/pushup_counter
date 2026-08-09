@@ -73,6 +73,28 @@ const REPOSITION_INVALID_MS = 1200;
 // only a longer, genuine break should actually pause counting.
 const POSTURE_GRACE_MS = 1000;
 
+// 'practice': no time limit, no red-zone penalty (today's behavior).
+// 'record': 60s time limit; resting in the red zone (gauge top 20%) for too
+// long disqualifies the attempt. 'adventure': stage-based mode, not built
+// yet — the button exists but just explains that for now.
+type Mode = 'practice' | 'record' | 'adventure';
+
+const MODE_LABELS: Record<Mode, string> = {
+  practice: '연습모드',
+  record: '기록모드',
+  adventure: '모험모드',
+};
+
+type SessionEndReason = 'time' | 'disqualified';
+type SessionResult = { reason: SessionEndReason; count: number; elapsedSec: number };
+
+const RECORD_MODE_SECONDS = 60;
+// Matches the gauge's visual red zone (top 20% — see gaugeZone flex values
+// in ProgressGauge below), not DOWN_NORM_THRESHOLD/UP_NORM_THRESHOLD (which
+// drive counting hysteresis and are a different, unrelated pair of cutoffs).
+const RED_ZONE_PROGRESS_THRESHOLD = 0.2;
+const RED_ZONE_DISQUALIFY_MS = 2000;
+
 // armCurlTest is a temporary tuning aid (see its comment in pose.ts), not a
 // real workout mode — remove this tab once pushup/squat tuning is done.
 const EXERCISE_ORDER: ExerciseId[] = ['pushup', 'squat', 'jumpingJack', 'armCurlTest'];
@@ -269,18 +291,22 @@ const ProgressGauge = forwardRef<ProgressGaugeHandle, {}>(function ProgressGauge
 export default function CameraScreen() {
   const { hasPermission, requestPermission } = useCameraPermission();
 
+  const [mode, setMode] = useState<Mode | null>(null);
   const [cameraPosition, setCameraPosition] = useState<CameraPosition>('front');
   const [exercise, setExercise] = useState<ExerciseId>('pushup');
   const [count, setCount] = useState(0);
   const [stage, setStage] = useState<Stage>('up');
   const [phase, setPhase] = useState<Phase>('idle');
   const [calibrationSecondsLeft, setCalibrationSecondsLeft] = useState(CALIBRATION_SECONDS);
+  const [timeLeftSec, setTimeLeftSec] = useState(RECORD_MODE_SECONDS);
+  const [sessionResult, setSessionResult] = useState<SessionResult | null>(null);
   const [postureOk, setPostureOk] = useState(true);
   const exerciseConfig = EXERCISES[exercise];
 
   // Read from refs inside the stable onResults callback so switching
   // exercise/pause doesn't force react-native-mediapipe to recreate the
   // native pose detector.
+  const modeRef = useRef<Mode | null>(null);
   const exerciseRef = useRef<ExerciseId>('pushup');
   const phaseRef = useRef<Phase>('idle');
   const stageRef = useRef<Stage>('up');
@@ -298,7 +324,15 @@ export default function CameraScreen() {
   // countdown — captured every frame so whatever's current when the
   // countdown ends becomes the seeded reference point.
   const calibrationYRef = useRef<number | null>(null);
+  // Record mode only: when the current continuous red-zone stretch started,
+  // or null while out of the red zone. Timestamp the tracking phase began,
+  // used to compute the elapsed time shown on the result screen.
+  const redZoneEnteredAtRef = useRef<number | null>(null);
+  const sessionStartRef = useRef<number | null>(null);
 
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
   useEffect(() => {
     exerciseRef.current = exercise;
   }, [exercise]);
@@ -316,12 +350,40 @@ export default function CameraScreen() {
       if (config.signal === 'verticalDisplacement' && calibrationYRef.current != null) {
         displacementCounterRef.current.seedReference(calibrationYRef.current);
       }
+      if (modeRef.current === 'record') {
+        sessionStartRef.current = Date.now();
+        redZoneEnteredAtRef.current = null;
+        setTimeLeftSec(RECORD_MODE_SECONDS);
+      }
       setPhase('tracking');
       return;
     }
     const timer = setTimeout(() => setCalibrationSecondsLeft((s) => s - 1), 1000);
     return () => clearTimeout(timer);
   }, [phase, calibrationSecondsLeft]);
+
+  // Ends the current record-mode attempt (time ran out or disqualified) and
+  // shows the result screen. Only reads refs/stable setters, so it's safe to
+  // call from onResults despite that callback's empty dep array.
+  const endSession = useCallback((reason: SessionEndReason) => {
+    const elapsedSec =
+      sessionStartRef.current != null
+        ? Math.min(RECORD_MODE_SECONDS, Math.round((Date.now() - sessionStartRef.current) / 1000))
+        : 0;
+    setSessionResult({ reason, count: countRef.current, elapsedSec });
+    setPhase('idle');
+  }, []);
+
+  // Record mode's 60s countdown — only runs while actually tracking.
+  useEffect(() => {
+    if (mode !== 'record' || phase !== 'tracking') return;
+    if (timeLeftSec <= 0) {
+      endSession('time');
+      return;
+    }
+    const timer = setTimeout(() => setTimeLeftSec((s) => s - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [mode, phase, timeLeftSec, endSession]);
 
   const onResults = useCallback(
     (result: PoseDetectionResultBundle, vc: ViewCoordinator) => {
@@ -370,6 +432,44 @@ export default function CameraScreen() {
         score: p.score,
       }));
 
+      // Feeds the gauge and, in record mode, tracks continuous red-zone
+      // time — disqualifying the attempt if it's spent too long there.
+      const applyProgress = (p: number) => {
+        progressGaugeRef.current?.setTargetProgress(p);
+        if (modeRef.current !== 'record') return;
+        if (p < RED_ZONE_PROGRESS_THRESHOLD) {
+          if (redZoneEnteredAtRef.current == null) {
+            redZoneEnteredAtRef.current = Date.now();
+          } else if (Date.now() - redZoneEnteredAtRef.current >= RED_ZONE_DISQUALIFY_MS) {
+            endSession('disqualified');
+          }
+        } else {
+          redZoneEnteredAtRef.current = null;
+        }
+      };
+
+      // Marks (or extends) the current invalid-posture/no-person stretch,
+      // disqualifying in record mode once it's run long enough. Standing up
+      // to rest doesn't necessarily land in the gauge's red zone — the
+      // seeded reference is wherever the person happened to be at the end
+      // of the calibration hold (the exercise's *starting* position), not
+      // "fully upright," so standing can land anywhere in the deviation
+      // range, including the middle "in progress" zone. isValidPosture
+      // already recognizes "not actually in the exercise position" (e.g.
+      // its torso-orientation check for push-ups) independent of that
+      // seeded reference, so a sustained failure there is the reliable
+      // signal that they've stood up to rest, not the gauge position.
+      const markInvalidPosture = () => {
+        if (invalidPostureSinceRef.current == null) {
+          invalidPostureSinceRef.current = Date.now();
+        } else if (
+          modeRef.current === 'record' &&
+          Date.now() - invalidPostureSinceRef.current >= RED_ZONE_DISQUALIFY_MS
+        ) {
+          endSession('disqualified');
+        }
+      };
+
       if (phaseRef.current === 'calibrating') {
         // No posture/counting logic yet — just keep the latest reading
         // fresh so whatever it is when the countdown ends becomes the
@@ -403,8 +503,8 @@ export default function CameraScreen() {
             displacementCounterRef.current.recalibrate();
           }
           invalidPostureSinceRef.current = null;
-        } else if (invalidPostureSinceRef.current == null) {
-          invalidPostureSinceRef.current = Date.now();
+        } else {
+          markInvalidPosture();
         }
 
         // Tolerate a brief invalid stretch (see POSTURE_GRACE_MS) instead of
@@ -437,7 +537,7 @@ export default function CameraScreen() {
             };
             const update = angleCounterRef.current.update(left, right, Date.now(), config);
             if (update != null) {
-              progressGaugeRef.current?.setTargetProgress(update.progress);
+              applyProgress(update.progress);
               if (update.stage !== stageRef.current) {
                 stageRef.current = update.stage;
                 setStage(update.stage);
@@ -460,7 +560,7 @@ export default function CameraScreen() {
               const auxValid = config.depthConfirm ? config.depthConfirm(pts, normScreenPts) : true;
               const update = displacementCounterRef.current.update(y, Date.now(), auxValid);
               if (update != null) {
-                progressGaugeRef.current?.setTargetProgress(update.progress);
+                applyProgress(update.progress);
                 if (update.stage !== stageRef.current) {
                   stageRef.current = update.stage;
                   setStage(update.stage);
@@ -486,7 +586,7 @@ export default function CameraScreen() {
             };
             const update = sideAngleCounterRef.current.update(left, right, Date.now());
             if (update != null) {
-              progressGaugeRef.current?.setTargetProgress(update.progress);
+              applyProgress(update.progress);
               if (update.stage !== stageRef.current) {
                 stageRef.current = update.stage;
                 setStage(update.stage);
@@ -501,11 +601,13 @@ export default function CameraScreen() {
       } else {
         setPostureOk(true);
         progressGaugeRef.current?.setTargetProgress(null);
-        // No person at all is at least as much "not in position" as a
-        // failed posture check — count it the same way so a long absence
-        // (walked away, camera lost them) still triggers a recalibration
-        // on return, same as a standing-to-prone transition would.
-        if (invalidPostureSinceRef.current == null) invalidPostureSinceRef.current = Date.now();
+        // Not "in the red zone" (no progress reading to judge), but no
+        // person at all is at least as much "not in position" — walking out
+        // of frame is the clearest possible rest/cheat in record mode, so it
+        // goes through the same markInvalidPosture path as a sustained
+        // invalid posture (also drives the recalibration trigger on return).
+        redZoneEnteredAtRef.current = null;
+        markInvalidPosture();
       }
 
       // Feed the child component imperatively (ref call, not state) so this
@@ -553,10 +655,14 @@ export default function CameraScreen() {
     angleCounterRef.current.reset();
     invalidPostureSinceRef.current = null;
     calibrationYRef.current = null;
+    redZoneEnteredAtRef.current = null;
+    sessionStartRef.current = null;
     setCount(0);
     setStage('up');
     progressGaugeRef.current?.setTargetProgress(null);
     setPhase('idle');
+    setTimeLeftSec(RECORD_MODE_SECONDS);
+    setSessionResult(null);
   };
 
   const handleSelectExercise = (id: ExerciseId) => {
@@ -576,6 +682,7 @@ export default function CameraScreen() {
   };
 
   const handleStart = () => {
+    setSessionResult(null);
     setCalibrationSecondsLeft(CALIBRATION_SECONDS);
     calibrationYRef.current = null;
     setPhase('calibrating');
@@ -584,6 +691,39 @@ export default function CameraScreen() {
   const handleStop = () => {
     setPhase('idle');
   };
+
+  if (mode == null) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.modeSelectTitle}>모드 선택</Text>
+        <Pressable style={styles.modeButton} onPress={() => setMode('practice')}>
+          <Text style={styles.modeButtonTitle}>연습모드</Text>
+          <Text style={styles.modeButtonDesc}>시간 제한 없이 자유롭게 연습해요</Text>
+        </Pressable>
+        <Pressable style={styles.modeButton} onPress={() => setMode('record')}>
+          <Text style={styles.modeButtonTitle}>기록모드</Text>
+          <Text style={styles.modeButtonDesc}>
+            60초 안에 최대한 많이 · 레드존에 2초 이상 있으면 탈락
+          </Text>
+        </Pressable>
+        <Pressable style={styles.modeButton} onPress={() => setMode('adventure')}>
+          <Text style={styles.modeButtonTitle}>모험모드</Text>
+          <Text style={styles.modeButtonDesc}>준비 중이에요</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  if (mode === 'adventure') {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.hint}>모험모드는 아직 준비 중이에요!</Text>
+        <Pressable style={styles.button} onPress={() => setMode(null)}>
+          <Text style={styles.buttonText}>모드 선택으로</Text>
+        </Pressable>
+      </View>
+    );
+  }
 
   if (!hasPermission) {
     return (
@@ -598,18 +738,29 @@ export default function CameraScreen() {
 
   return (
     <View style={styles.container}>
-      <View style={styles.exerciseTabs}>
-        {EXERCISE_ORDER.map((id) => (
-          <Pressable
-            key={id}
-            style={[styles.tab, exercise === id && styles.tabActive]}
-            onPress={() => handleSelectExercise(id)}
-          >
-            <Text style={[styles.tabText, exercise === id && styles.tabTextActive]}>
-              {EXERCISES[id].label}
-            </Text>
-          </Pressable>
-        ))}
+      <View style={styles.topBar}>
+        <Pressable
+          style={styles.backButton}
+          onPress={() => {
+            handleStop();
+            setMode(null);
+          }}
+        >
+          <Text style={styles.backButtonText}>‹ {mode != null ? MODE_LABELS[mode] : '모드'}</Text>
+        </Pressable>
+        <View style={styles.exerciseTabs}>
+          {EXERCISE_ORDER.map((id) => (
+            <Pressable
+              key={id}
+              style={[styles.tab, exercise === id && styles.tabActive]}
+              onPress={() => handleSelectExercise(id)}
+            >
+              <Text style={[styles.tabText, exercise === id && styles.tabTextActive]}>
+                {EXERCISES[id].label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
       </View>
 
       <View style={[styles.cameraBox, { width: PREVIEW_SIZE, height: PREVIEW_SIZE }]}>
@@ -624,6 +775,17 @@ export default function CameraScreen() {
           <Text style={styles.cameraSwitchButtonText}>카메라 전환</Text>
         </Pressable>
 
+        {mode === 'record' && phase === 'tracking' && (
+          // A shrinking bar reads at a glance from across a room — the
+          // "30초" text badge this replaced turned out to be unreadable
+          // from normal workout distance.
+          <View style={styles.recordTimerBarTrack}>
+            <View
+              style={[styles.recordTimerBarFill, { width: `${(timeLeftSec / RECORD_MODE_SECONDS) * 100}%` }]}
+            />
+          </View>
+        )}
+
         {phase === 'calibrating' && (
           <View style={styles.calibrationOverlay}>
             <Text style={styles.calibrationCountdown}>{calibrationSecondsLeft}</Text>
@@ -632,6 +794,30 @@ export default function CameraScreen() {
         )}
 
         {phase === 'tracking' && <ProgressGauge ref={progressGaugeRef} />}
+
+        {sessionResult != null && (
+          <View style={styles.calibrationOverlay}>
+            <Text style={styles.resultTitle}>
+              {sessionResult.reason === 'time' ? '시간 종료!' : '레드존 초과로 탈락!'}
+            </Text>
+            <Text style={styles.resultStats}>{sessionResult.count}회</Text>
+            <Text style={styles.calibrationHint}>{sessionResult.elapsedSec}초 동안 기록</Text>
+            <View style={styles.controls}>
+              <Pressable style={styles.button} onPress={handleStart}>
+                <Text style={styles.buttonText}>다시하기</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.button, styles.buttonSecondary]}
+                onPress={() => {
+                  handleReset();
+                  setMode(null);
+                }}
+              >
+                <Text style={styles.buttonText}>모드 선택</Text>
+              </Pressable>
+            </View>
+          </View>
+        )}
       </View>
 
       <View style={styles.counterCard}>
@@ -672,10 +858,71 @@ const styles = StyleSheet.create({
     padding: 24,
     gap: 16,
   },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
+  backButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: '#1E1E27',
+  },
+  backButtonText: {
+    color: '#8A8A93',
+    fontSize: 14,
+    fontWeight: '600',
+  },
   exerciseTabs: {
     flexDirection: 'row',
     gap: 8,
-    marginBottom: 12,
+  },
+  modeSelectTitle: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  modeButton: {
+    width: '100%',
+    backgroundColor: '#1E1E27',
+    borderRadius: 16,
+    paddingVertical: 18,
+    paddingHorizontal: 20,
+    gap: 6,
+  },
+  modeButtonTitle: {
+    color: '#39FF88',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  modeButtonDesc: {
+    color: '#8A8A93',
+    fontSize: 13,
+  },
+  recordTimerBarTrack: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 10, // shorter than cameraSwitchButton's top offset (12) so they don't overlap
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  recordTimerBarFill: {
+    height: '100%',
+    backgroundColor: '#39FF88',
+  },
+  resultTitle: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  resultStats: {
+    color: '#39FF88',
+    fontSize: 64,
+    fontWeight: '800',
   },
   tab: {
     paddingVertical: 8,
