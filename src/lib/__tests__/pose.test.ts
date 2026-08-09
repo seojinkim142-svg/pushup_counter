@@ -1,13 +1,16 @@
 import {
   AngleRepCounter,
   EXERCISES,
+  JUMPING_JACK_SPREAD_RATIO,
   MIN_KEYPOINT_SCORE,
   SideAngleRepCounter,
   VerticalRepCounter,
   angleDegrees,
   angleToProgress,
+  ankleSpreadRatio,
   averageVisibleY,
   isPersonPresent,
+  relativeVisibleY,
   type AngleExerciseConfig,
   type Point,
 } from '../pose';
@@ -49,6 +52,57 @@ describe('averageVisibleY', () => {
   });
 });
 
+describe('relativeVisibleY', () => {
+  it('returns the raw average when no reference landmarks are given', () => {
+    const points = [point(0, 0.4, 0.9)];
+    expect(relativeVisibleY(points, [0])).toBeCloseTo(0.4);
+  });
+
+  it('returns landmarks.y - referenceLandmarks.y when a reference is given', () => {
+    const points = [point(0, 0.6, 0.9), point(0, 0.2, 0.9)];
+    expect(relativeVisibleY(points, [0], [1])).toBeCloseTo(0.4);
+  });
+
+  it('stays constant under a whole-body Y shift, unlike the raw position', () => {
+    // Both landmark and reference move down by the same amount (e.g. person
+    // stepped closer to a low camera) — the raw position changes, but the
+    // relative offset between the two points should not.
+    const before = [point(0, 0.5, 0.9), point(0, 0.3, 0.9)];
+    const after = [point(0, 0.7, 0.9), point(0, 0.5, 0.9)]; // both +0.2
+    const relBefore = relativeVisibleY(before, [0], [1]);
+    const relAfter = relativeVisibleY(after, [0], [1]);
+    expect(relBefore).toBeCloseTo(relAfter!);
+  });
+
+  it('returns null if the reference landmarks are not confidently visible', () => {
+    const points = [point(0, 0.6, 0.9), point(0, 0.2, 0.1)];
+    expect(relativeVisibleY(points, [0], [1])).toBeNull();
+  });
+});
+
+/** Builds a points array with shoulders at x=±shoulderHalfWidth and ankles at x=±ankleHalfWidth (indices 11/12/27/28). */
+function stanceWidthPoints(shoulderHalfWidth: number, ankleHalfWidth: number, score = 1): Point[] {
+  const points: Point[] = new Array(29).fill(point(0, 0, 0));
+  points[11] = point(-shoulderHalfWidth, 0, score); // leftShoulder
+  points[12] = point(shoulderHalfWidth, 0, score); // rightShoulder
+  points[27] = point(-ankleHalfWidth, 1, score); // leftAnkle
+  points[28] = point(ankleHalfWidth, 1, score); // rightAnkle
+  return points;
+}
+
+describe('ankleSpreadRatio', () => {
+  it('computes ankle distance normalized by shoulder width', () => {
+    // shoulder width 0.2, ankle distance 0.5 -> ratio 2.5
+    expect(ankleSpreadRatio(stanceWidthPoints(0.1, 0.25))).toBeCloseTo(2.5);
+  });
+
+  it('returns null when any required landmark is not confidently visible', () => {
+    const points = stanceWidthPoints(0.1, 0.25);
+    points[28] = point(0.25, 1, 0.1); // rightAnkle below confidence threshold
+    expect(ankleSpreadRatio(points)).toBeNull();
+  });
+});
+
 describe('angleDegrees / angleToProgress', () => {
   it('measures a straight line as 180 degrees', () => {
     expect(angleDegrees(0, -1, 0, 0, 0, 1)).toBeCloseTo(180);
@@ -74,26 +128,46 @@ describe('EXERCISES.pushup.isValidPosture', () => {
 
   it('requires wrists to be well below the shoulders', () => {
     const shoulderY = 0.3;
-    const wristBelow = [
-      point(0, shoulderY, 0.9), // leftShoulder (11)
-      point(0, shoulderY, 0.9), // rightShoulder (12)
-    ];
-    const points: Point[] = new Array(17).fill(point(0, 0, 0));
-    points[11] = point(0, shoulderY, 0.9);
-    points[12] = point(0, shoulderY, 0.9);
+    const points: Point[] = new Array(25).fill(point(0, 0, 0));
+    points[11] = point(0, shoulderY, 0.9); // leftShoulder
+    points[12] = point(0, shoulderY, 0.9); // rightShoulder
     points[15] = point(0, shoulderY + 0.2, 0.9); // leftWrist well below
     points[16] = point(0, shoulderY + 0.2, 0.9); // rightWrist well below
+    // Hips not visible (score 0) — falls back to the wrist-only check.
     expect(config.isValidPosture!(points)).toBe(true);
-    void wristBelow;
   });
 
   it('rejects a standing posture where wrists are near/above shoulder height', () => {
-    const points: Point[] = new Array(17).fill(point(0, 0, 0));
+    const points: Point[] = new Array(25).fill(point(0, 0, 0));
     points[11] = point(0, 0.3, 0.9);
     points[12] = point(0, 0.3, 0.9);
     points[15] = point(0, 0.25, 0.9); // wrist above shoulder (curling, not planked)
     points[16] = point(0, 0.25, 0.9);
     expect(config.isValidPosture!(points)).toBe(false);
+  });
+
+  it('rejects an upright torso even when a wrist dips below shoulder height (e.g. warming up)', () => {
+    const points: Point[] = new Array(25).fill(point(0, 0, 0));
+    points[11] = point(-0.1, 0.2, 0.9); // leftShoulder (shoulder width 0.2)
+    points[12] = point(0.1, 0.2, 0.9); // rightShoulder
+    points[15] = point(0, 0.3, 0.9); // wrists below shoulders, satisfies that check alone
+    points[16] = point(0, 0.3, 0.9);
+    points[23] = point(-0.1, 0.9, 0.9); // leftHip — standing, far below shoulders
+    points[24] = point(0.1, 0.9, 0.9); // rightHip
+    // Vertical shoulder-hip span (0.7) vs shoulder width (0.2) -> ratio 3.5,
+    // well above PUSHUP_TORSO_UPRIGHT_RATIO -> looks like standing, not prone.
+    expect(config.isValidPosture!(points)).toBe(false);
+  });
+
+  it('accepts a prone torso (shoulder-hip span small relative to shoulder width)', () => {
+    const points: Point[] = new Array(25).fill(point(0, 0, 0));
+    points[11] = point(-0.1, 0.2, 0.9); // leftShoulder (shoulder width 0.2)
+    points[12] = point(0.1, 0.2, 0.9);
+    points[15] = point(0, 0.3, 0.9); // wrists below shoulders
+    points[16] = point(0, 0.3, 0.9);
+    points[23] = point(-0.1, 0.3, 0.9); // leftHip — close to shoulder height (prone)
+    points[24] = point(0.1, 0.3, 0.9);
+    expect(config.isValidPosture!(points)).toBe(true);
   });
 });
 
@@ -112,6 +186,28 @@ describe('EXERCISES.squat.isValidPosture', () => {
     const points: Point[] = new Array(29).fill(point(0, 0, 0));
     points[23] = point(0, 0, 0.9); // hip visible
     // knee/ankle missing on both sides
+    expect(config.isValidPosture!(points)).toBe(false);
+  });
+});
+
+describe('EXERCISES.jumpingJack.isValidPosture', () => {
+  const config = EXERCISES.jumpingJack;
+
+  it('accepts a standing, camera-facing posture (shoulders above hips)', () => {
+    const points: Point[] = new Array(25).fill(point(0, 0, 0));
+    points[11] = point(0, 0.3, 0.9); // leftShoulder
+    points[12] = point(0, 0.3, 0.9); // rightShoulder
+    points[23] = point(0, 0.6, 0.9); // leftHip
+    points[24] = point(0, 0.6, 0.9); // rightHip
+    expect(config.isValidPosture!(points)).toBe(true);
+  });
+
+  it('rejects when shoulders are not above hips (e.g. bent over or lying down)', () => {
+    const points: Point[] = new Array(25).fill(point(0, 0, 0));
+    points[11] = point(0, 0.6, 0.9); // leftShoulder
+    points[12] = point(0, 0.6, 0.9); // rightShoulder
+    points[23] = point(0, 0.3, 0.9); // leftHip (above shoulders)
+    points[24] = point(0, 0.3, 0.9); // rightHip
     expect(config.isValidPosture!(points)).toBe(false);
   });
 });
@@ -174,6 +270,116 @@ describe('VerticalRepCounter', () => {
     expect(holdY(counter, 0.5, 0).last).toBeNull(); // calibration range forgotten
   });
 
+  it('recalibrate() forgets calibration and stage but keeps the count', () => {
+    const counter = new VerticalRepCounter();
+    let t = 0;
+    ({ t } = holdY(counter, 0.2, t));
+    ({ t } = holdY(counter, 0.8, t));
+    expect(counter.count).toBe(1);
+    expect(counter.stage).toBe('down');
+
+    counter.recalibrate();
+    expect(counter.count).toBe(1); // unlike reset(), the tally survives
+    expect(counter.stage).toBe('up');
+    expect(holdY(counter, 0.5, t).last).toBeNull(); // calibration range forgotten
+
+    // A stale wide range (e.g. from standing warm-up) shouldn't linger: a
+    // real full rep on the new, correctly-scaled range must still count.
+    ({ t } = holdY(counter, 0.2, t));
+    holdY(counter, 0.8, t);
+    expect(counter.count).toBe(2);
+  });
+
+  it('seedReference() anchors the range at a deliberately-captured value instead of an organic one', () => {
+    const counter = new VerticalRepCounter();
+    let t = 0;
+    // Establish a count first, to confirm seedReference() preserves it.
+    ({ t } = holdY(counter, 0.2, t));
+    ({ t } = holdY(counter, 0.8, t));
+    expect(counter.count).toBe(1);
+
+    // Seed at a deliberately-captured "top" reference (e.g. from a
+    // multi-second hold before tracking starts) — must NOT immediately
+    // register as calibrated off just this single point.
+    counter.seedReference(0.3);
+    expect(counter.count).toBe(1); // preserved, unlike reset()
+    expect(counter.stage).toBe('up');
+    // Holding right at the seeded value shouldn't complete calibration —
+    // range is 0 until real motion happens.
+    expect(holdY(counter, 0.3, t).last).toBeNull();
+
+    // A real rep starting from the seeded reference counts normally.
+    ({ t } = holdY(counter, 0.3, t));
+    holdY(counter, 0.9, t);
+    expect(counter.count).toBe(2);
+  });
+
+  it('seedReference() counts correctly even when real motion moves the raw signal downward, not up', () => {
+    // The direction a seeded signal moves during a real rep isn't knowable
+    // in advance (depends on camera angle / body proportions) — this is the
+    // "arm bend showed green instead of red" bug: with a naive min/max
+    // seed, motion in the "wrong" direction from the reference inverted
+    // which end read as red vs. green. Deviation-from-reference must get
+    // this right regardless of which way the raw value actually moves.
+    const counter = new VerticalRepCounter();
+    counter.seedReference(0.5);
+    let t = 0;
+    // Real rep motion decreases y below the reference instead of increasing it.
+    // Extra frames (>MIN_CALIBRATION_SAMPLES=10) so calibration finishes and
+    // the filter fully settles within each phase.
+    ({ t } = holdY(counter, 0.1, t, 16));
+    const atReference = holdY(counter, 0.5, t, 16);
+    expect(atReference.last?.progress).toBeCloseTo(0, 1); // back at reference reads as "rest", not "full depth"
+    t = atReference.t;
+
+    ({ t } = holdY(counter, 0.1, t, 16));
+    holdY(counter, 0.5, t, 16);
+    expect(counter.count).toBe(2); // both down/up cycles counted normally
+  });
+
+  it('counts the rep if the auxiliary condition was true at any point during the up phase, even if false right at the crossing', () => {
+    const counter = new VerticalRepCounter();
+    let t = 0;
+    ({ t } = holdY(counter, 0.2, t)); // establish calibration with a normal rep
+    ({ t } = holdY(counter, 0.8, t));
+    expect(counter.count).toBe(1);
+
+    // Back up: aux condition (e.g. "legs spread") is true mid-air but has
+    // already gone false again by the time the wrists cross back down —
+    // real reps rarely line up the two signals on the exact same frame.
+    for (let i = 0; i < 4; i++) {
+      counter.update(0.2, t, true);
+      t += FRAME_DT_MS;
+    }
+    for (let i = 0; i < 4; i++) {
+      counter.update(0.2, t, false);
+      t += FRAME_DT_MS;
+    }
+    for (let i = 0; i < 8; i++) {
+      counter.update(0.8, t, false); // aux false on every frame of the down-crossing itself
+      t += FRAME_DT_MS;
+    }
+    expect(counter.count).toBe(2);
+  });
+
+  it('does not count the rep if the auxiliary condition was never true during the up phase', () => {
+    const counter = new VerticalRepCounter();
+    let t = 0;
+    ({ t } = holdY(counter, 0.2, t)); // establish calibration with a normal rep
+    ({ t } = holdY(counter, 0.8, t));
+    expect(counter.count).toBe(1);
+
+    for (let i = 0; i < 8; i++) {
+      counter.update(0.2, t, false); // e.g. arms went up but legs never spread
+      t += FRAME_DT_MS;
+    }
+    for (let i = 0; i < 8; i++) {
+      counter.update(0.8, t, false);
+      t += FRAME_DT_MS;
+    }
+    expect(counter.count).toBe(1); // unchanged — second rep rejected
+  });
+
   it('does not open calibration on a small in-place shift (camera shake / posture wobble)', () => {
     const counter = new VerticalRepCounter();
     // A 5% wobble is below MIN_CALIBRATION_RANGE (8%), so it must stay null
@@ -184,19 +390,43 @@ describe('VerticalRepCounter', () => {
     expect(second.last).toBeNull();
   });
 
+  it('honors a custom minCalibrationRange for small-amplitude signals', () => {
+    // Default threshold (8%) would never open on a signal this small...
+    const defaultCounter = new VerticalRepCounter();
+    let t = 0;
+    ({ t } = holdY(defaultCounter, 0.10, t));
+    expect(holdY(defaultCounter, 0.13, t).last).toBeNull(); // 3% range, under the 8% default
+
+    // ...but a counter configured with a smaller floor should calibrate and count normally.
+    const smallRangeCounter = new VerticalRepCounter(1.2, 0.4, 1.0, 0.02);
+    t = 0;
+    ({ t } = holdY(smallRangeCounter, 0.1, t));
+    holdY(smallRangeCounter, 0.13, t);
+    expect(smallRangeCounter.count).toBe(1);
+  });
+
   it('does not double-count a rapid bounce that completes a second cycle inside the debounce window', () => {
     // A high cutoff makes the filter track the raw signal almost immediately,
     // so a full up/down/up cycle can be driven frame-by-frame instead of
     // needing many frames to settle — lets the test control exact timing.
     const counter = new VerticalRepCounter(100, 0, 100);
-    counter.update(0.2, 0); // establishes the top of the range
-    const firstDown = counter.update(0.9, FRAME_DT_MS); // crosses into the down zone
+    let t = 0;
+    // Pad past the minimum-sample calibration floor (10) before the timed
+    // sequence below, so that part only has to cross MIN_CALIBRATION_RANGE,
+    // not also wait out the sample-count floor.
+    for (let i = 0; i < 10; i++) {
+      counter.update(0.2, t); // establishes the top of the range
+      t += FRAME_DT_MS;
+    }
+    const firstDown = counter.update(0.9, t); // crosses into the down zone
+    t += FRAME_DT_MS;
     expect(firstDown?.justCounted).toBe(true);
     expect(counter.count).toBe(1);
 
-    counter.update(0.2, 2 * FRAME_DT_MS); // back to the up zone
+    counter.update(0.2, t); // back to the up zone
+    t += FRAME_DT_MS;
     // Second down-crossing lands well under 400ms after the first count.
-    const secondDown = counter.update(0.9, 3 * FRAME_DT_MS);
+    const secondDown = counter.update(0.9, t);
     expect(secondDown?.stage).toBe('down'); // hysteresis still flips the stage...
     expect(secondDown?.justCounted).toBe(false); // ...but the debounce blocks the count
     expect(counter.count).toBe(1);

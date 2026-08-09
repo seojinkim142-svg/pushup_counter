@@ -2,7 +2,7 @@ const { withDangerousMod, withXcodeProject } = require('@expo/config-plugins');
 const fs = require('fs');
 const path = require('path');
 
-const MODEL_FILENAME = 'pose_landmarker_lite.task';
+const MODEL_FILENAME = 'pose_landmarker_full.task';
 
 /**
  * react-native-mediapipe resolves its `model` param via Android's

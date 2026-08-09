@@ -44,7 +44,7 @@ export const VISIBLE_LANDMARK_INDICES: number[] = Array.from(
   new Set(SKELETON_EDGES.flat())
 );
 
-export type ExerciseId = 'pushup' | 'squat' | 'armCurlTest';
+export type ExerciseId = 'pushup' | 'squat' | 'jumpingJack' | 'armCurlTest';
 
 interface BaseExerciseConfig {
   id: ExerciseId;
@@ -77,12 +77,36 @@ export interface DisplacementExerciseConfig extends BaseExerciseConfig {
   /** Landmark indices averaged into the tracked vertical position. */
   landmarks: number[];
   /**
-   * Extra confirmation checked only at the instant the depth gauge crosses
-   * into the green zone — rejects the rep (but keeps the gauge/hysteresis
-   * running normally) if it fails, e.g. a half-squat that never really got
-   * low enough. Receives (rawLandmarks, screenSpaceLandmarks) since some
-   * checks (angles) want raw coordinates and others (Y-position compares)
-   * want the rotation-corrected screen-space ones.
+   * If set, the tracked value becomes avg(landmarks.y) - avg(referenceLandmarks.y)
+   * instead of the raw landmark position — a relative offset between two
+   * body points, immune to the whole body translating up/down on screen
+   * (moving closer to/further from the camera, standing vs. already being
+   * roughly in position, camera shake). Only the *relative* motion between
+   * the two point sets — e.g. elbow bending relative to the shoulder —
+   * moves the signal, so incidental whole-body movement can't get mistaken
+   * for rep progress or inflate the calibrated range the way it can with a
+   * single landmark's raw position.
+   */
+  referenceLandmarks?: number[];
+  /**
+   * Overrides VerticalRepCounter's default calibration-range floor for this
+   * exercise's signal. Needed when the signal's real full-rep amplitude
+   * (e.g. a relative offset between two nearby points) is much smaller than
+   * the default threshold was tuned for (an absolute landmark position) —
+   * without this, real reps could never accumulate enough range to finish
+   * calibrating at all.
+   */
+  minCalibrationRange?: number;
+  /**
+   * Extra per-frame condition, evaluated every frame (not just at the
+   * counting instant) and OR'd by VerticalRepCounter across the whole "up"
+   * phase — the rep is only counted if this was true at some point during
+   * that phase, so a secondary signal that doesn't peak on the exact same
+   * frame as the primary one (e.g. legs spreading vs. wrists reaching the
+   * top for a jumping jack) still gets picked up. Receives
+   * (rawLandmarks, screenSpaceLandmarks) since some checks (angles) want raw
+   * coordinates and others (position/distance compares) want the
+   * rotation-corrected screen-space ones.
    */
   depthConfirm?: (rawPoints: Point[], screenPoints: Point[]) => boolean;
 }
@@ -106,6 +130,16 @@ export type ExerciseConfig = AngleExerciseConfig | DisplacementExerciseConfig | 
 // stay visible in essentially every framing, so they're the safer signal.
 const PUSHUP_WRIST_BELOW_SHOULDER_MARGIN = 0.04;
 
+// Standing and just bending down/swinging arms (warming up) can momentarily
+// satisfy "wrist below shoulder" too, without being anywhere near a plank —
+// so when hips are visible, also require the torso to look roughly
+// horizontal (prone) rather than upright: standing has a large shoulder-hip
+// vertical span relative to shoulder width (~2.5x+ in practice), while a
+// low-camera plank view keeps that span comparatively small. Skipped when
+// hips aren't confidently visible (common for push-up framings), same as
+// the vertical-displacement signal falling back to shoulders-only.
+const PUSHUP_TORSO_UPRIGHT_RATIO = 2.0;
+
 export function averageVisibleY(points: Point[], indices: number[]): number | null {
   const ys: number[] = [];
   for (const i of indices) {
@@ -115,16 +149,73 @@ export function averageVisibleY(points: Point[], indices: number[]): number | nu
   return ys.reduce((a, b) => a + b, 0) / ys.length;
 }
 
+/**
+ * Like averageVisibleY, but relative to a second landmark set when
+ * `referenceLandmarks` is given — see DisplacementExerciseConfig.referenceLandmarks
+ * for why. Returns null if either side isn't confidently visible.
+ */
+export function relativeVisibleY(
+  points: Point[],
+  landmarks: number[],
+  referenceLandmarks?: number[]
+): number | null {
+  const y = averageVisibleY(points, landmarks);
+  if (y == null) return null;
+  if (!referenceLandmarks) return y;
+  const refY = averageVisibleY(points, referenceLandmarks);
+  if (refY == null) return null;
+  return y - refY;
+}
+
+// Ankle spread wider than this multiple of shoulder width counts as "legs
+// open" for a jumping jack. Normalized by shoulder width (rather than a
+// fixed distance) so it doesn't depend on how far the person is from the
+// camera.
+export const JUMPING_JACK_SPREAD_RATIO = 1.4;
+
+/**
+ * Ratio of ankle horizontal distance to shoulder width, in screen-space
+ * (rotation-corrected) coordinates — a distance ratio needs "left/right on
+ * screen", not raw sensor-space x/y. Returns null if any of the four
+ * landmarks isn't confidently visible (e.g. one leg stepped out of frame),
+ * in which case callers should treat leg-spread as unknown rather than
+ * false, so a person the camera can't fully see isn't penalized.
+ */
+export function ankleSpreadRatio(screenPoints: Point[]): number | null {
+  const leftAnkle = screenPoints[KnownPoseLandmarks.leftAnkle];
+  const rightAnkle = screenPoints[KnownPoseLandmarks.rightAnkle];
+  const leftShoulder = screenPoints[KnownPoseLandmarks.leftShoulder];
+  const rightShoulder = screenPoints[KnownPoseLandmarks.rightShoulder];
+  if (
+    leftAnkle.score <= MIN_KEYPOINT_SCORE ||
+    rightAnkle.score <= MIN_KEYPOINT_SCORE ||
+    leftShoulder.score <= MIN_KEYPOINT_SCORE ||
+    rightShoulder.score <= MIN_KEYPOINT_SCORE
+  ) {
+    return null;
+  }
+  const shoulderWidth = Math.abs(leftShoulder.x - rightShoulder.x);
+  if (shoulderWidth < 1e-6) return null;
+  return Math.abs(leftAnkle.x - rightAnkle.x) / shoulderWidth;
+}
+
 export const EXERCISES: Record<ExerciseId, ExerciseConfig> = {
   pushup: {
     id: 'pushup',
     label: '푸시업',
     // Facing the camera, the upper/forearm point toward/away from the lens,
-    // so elbow angle is badly foreshortened and jitters with the lite
-    // model's landmark noise. Shoulder height moving down-and-up on screen
-    // is a far more stable signal for a front-facing camera.
+    // so elbow *angle* is badly foreshortened and jitters with the lite
+    // model's landmark noise — but elbow height *relative to the shoulder*
+    // doesn't have that problem and, unlike tracking shoulder position
+    // outright, is immune to the whole body translating on screen. On-device
+    // this signal's real range runs roughly 0.03-0.12 (much smaller than
+    // shoulder position's), well under the default MIN_CALIBRATION_RANGE
+    // (0.08, tuned for the old signal) — minCalibrationRange below scales
+    // it down to match, or full reps would never finish calibrating.
     signal: 'verticalDisplacement',
-    landmarks: [KnownPoseLandmarks.leftShoulder, KnownPoseLandmarks.rightShoulder],
+    landmarks: [KnownPoseLandmarks.leftElbow, KnownPoseLandmarks.rightElbow],
+    referenceLandmarks: [KnownPoseLandmarks.leftShoulder, KnownPoseLandmarks.rightShoulder],
+    minCalibrationRange: 0.025,
     downLabel: '내려가는 중',
     upLabel: '준비',
     isValidPosture: (points) => {
@@ -134,7 +225,21 @@ export const EXERCISES: Record<ExerciseId, ExerciseConfig> = {
         KnownPoseLandmarks.rightShoulder,
       ]);
       if (wristY == null || shoulderY == null) return false;
-      return wristY > shoulderY + PUSHUP_WRIST_BELOW_SHOULDER_MARGIN;
+      if (wristY <= shoulderY + PUSHUP_WRIST_BELOW_SHOULDER_MARGIN) return false;
+
+      const hipY = averageVisibleY(points, [KnownPoseLandmarks.leftHip, KnownPoseLandmarks.rightHip]);
+      if (hipY != null) {
+        const leftShoulder = points[KnownPoseLandmarks.leftShoulder];
+        const rightShoulder = points[KnownPoseLandmarks.rightShoulder];
+        if (leftShoulder.score > MIN_KEYPOINT_SCORE && rightShoulder.score > MIN_KEYPOINT_SCORE) {
+          const shoulderWidth = Math.abs(leftShoulder.x - rightShoulder.x);
+          const torsoVerticalSpan = Math.abs(shoulderY - hipY);
+          if (shoulderWidth > 1e-6 && torsoVerticalSpan / shoulderWidth > PUSHUP_TORSO_UPRIGHT_RATIO) {
+            return false; // torso looks upright/standing, not prone
+          }
+        }
+      }
+      return true;
     },
     postureHint: '손을 바닥에 짚고 엎드린 자세를 잡아주세요',
   },
@@ -161,6 +266,46 @@ export const EXERCISES: Record<ExerciseId, ExerciseConfig> = {
       return leftOk || rightOk;
     },
     postureHint: '카메라 옆쪽에 서서 엉덩이·무릎·발목이 다 보이게 해주세요',
+  },
+  jumpingJack: {
+    id: 'jumpingJack',
+    label: '팔벌려뛰기',
+    // Facing the camera, the wrists travel a huge vertical distance —
+    // sides-down at rest to overhead at the peak — making them a much
+    // stronger front-view signal than the shoulders (used for push-ups),
+    // and unlike an elbow/knee angle there's no foreshortening concern
+    // since it's a position signal, not an angle.
+    signal: 'verticalDisplacement',
+    landmarks: [KnownPoseLandmarks.leftWrist, KnownPoseLandmarks.rightWrist],
+    // Resting between reps is arms-down (large wrist Y, the counter's
+    // "down" stage), unlike push-ups/squats where the rest position is the
+    // "up" stage — so the label mapping is flipped relative to those.
+    downLabel: '준비',
+    upLabel: '점프!',
+    isValidPosture: (points) => {
+      const shoulderY = averageVisibleY(points, [
+        KnownPoseLandmarks.leftShoulder,
+        KnownPoseLandmarks.rightShoulder,
+      ]);
+      const hipY = averageVisibleY(points, [KnownPoseLandmarks.leftHip, KnownPoseLandmarks.rightHip]);
+      // Rough "standing and facing the camera" check — shoulders need to be
+      // above hips on screen, which fails if the person is lying down, bent
+      // over, or the camera is at a strange angle.
+      if (shoulderY == null || hipY == null) return false;
+      return shoulderY < hipY;
+    },
+    // Arms alone can't tell a jumping jack from someone just waving their
+    // arms overhead while standing still — legs spreading is the other half
+    // of the motion. Checked every frame (not just at the wrist-signal's
+    // down-crossing) and OR'd across the rep by VerticalRepCounter, so it
+    // doesn't matter that leg-spread doesn't peak on the exact same frame as
+    // the wrists reaching the top. Unmeasurable (ankles/shoulders not
+    // visible) defaults to true rather than rejecting the rep outright.
+    depthConfirm: (_rawPoints, screenPoints) => {
+      const ratio = ankleSpreadRatio(screenPoints);
+      return ratio == null || ratio > JUMPING_JACK_SPREAD_RATIO;
+    },
+    postureHint: '카메라를 정면으로 보고 전신이 화면에 들어오게 서주세요',
   },
   // Temporary tuning aid, not a real workout mode: counts a standing arm
   // curl (shoulder-elbow-wrist angle) instead of a push-up/squat, so the
@@ -220,6 +365,12 @@ export function angleToProgress(angle: number, config: AngleExerciseConfig): num
 // comfortably smaller than a real rep's travel but big enough that noise
 // alone won't reach it.
 const MIN_CALIBRATION_RANGE = 0.08; // normalized screen-height units
+// A small minCalibrationRange (for low-amplitude signals) can be spanned by
+// as few as two sparse/unrepresentative frames — this requires calibration
+// to also see at least this many frames before it can "lock in", so the
+// observed min/max have had a real chance to visit the signal's true
+// extremes rather than whatever the first couple of frames happened to be.
+const MIN_CALIBRATION_SAMPLES = 10;
 const DOWN_NORM_THRESHOLD = 0.7;
 const UP_NORM_THRESHOLD = 0.3;
 // Floor on time between counted reps — guards against a single noisy frame
@@ -256,11 +407,34 @@ export class VerticalRepCounter {
   private minY = Infinity;
   private maxY = -Infinity;
   private lastCountTimestamp = -Infinity;
+  // Whether `auxValid` was true at any point during the current "up" (away
+  // from rest) phase — not just on the single frame the down-crossing
+  // happens to land on. A secondary signal (e.g. legs spread, for jumping
+  // jacks) rarely peaks on the exact same frame as the primary one, so
+  // requiring it only at the crossing instant would miss valid reps.
+  private auxConfirmedThisRep = true;
+  private minCalibrationRange: number;
+  // Frames seen since the last reset/recalibrate. A small minCalibrationRange
+  // (needed for low-amplitude signals) means as few as two noisy/unrepresentative
+  // frames can span it by coincidence — requiring a minimum sample count too
+  // means calibration can't "lock in" off a couple of sparse points before the
+  // signal has had a real chance to visit its true extremes.
+  private samplesSeen = 0;
+  // Set by seedReference(): "rest" position captured deliberately rather
+  // than inferred from organic min/max. Which *direction* real rep motion
+  // moves the raw signal from here isn't knowable in advance (depends on
+  // camera angle, body proportions, exactly how the reference was posed) —
+  // tracking deviation in both directions instead of assuming "up" means
+  // the rest position is always norm 0 and the furthest point reached is
+  // always norm 1, regardless of which way the signal actually moves.
+  private referenceY: number | null = null;
+  private maxDeviation = 0;
   stage: 'up' | 'down' = 'up';
   count = 0;
 
-  constructor(minCutoff = 1.2, beta = 0.4, dCutoff = 1.0) {
+  constructor(minCutoff = 1.2, beta = 0.4, dCutoff = 1.0, minCalibrationRange = MIN_CALIBRATION_RANGE) {
     this.filter = new OneEuroFilter(minCutoff, beta, dCutoff);
+    this.minCalibrationRange = minCalibrationRange;
   }
 
   reset(): void {
@@ -268,37 +442,101 @@ export class VerticalRepCounter {
     this.minY = Infinity;
     this.maxY = -Infinity;
     this.lastCountTimestamp = -Infinity;
+    this.auxConfirmedThisRep = true;
+    this.samplesSeen = 0;
+    this.referenceY = null;
+    this.maxDeviation = 0;
     this.stage = 'up';
     this.count = 0;
   }
 
   /**
-   * Feed one frame's raw (unfiltered) vertical position.
-   * @param confirmDown extra check applied only at the instant of crossing
-   * into the green zone — if false, the stage still flips to `down` (so
-   * hysteresis stays correct) but the rep isn't counted.
+   * Like reset(), but keeps `count` — for "just settled into position"
+   * transitions (e.g. isValidPosture going false → true), where whatever
+   * range got calibrated *before* the person was actually in position
+   * (standing, warming up, getting set up) shouldn't carry over: a wide
+   * swing during that transition can make the calibrated range wider than
+   * a real rep's travel, so real reps then fall short of the down
+   * threshold, or — conversely — a small settling motion right after
+   * transitioning can look like a full rep against a range that hasn't
+   * calibrated yet. Falls back to organic min/max tracking (referenceY
+   * cleared) — there's no new deliberate reference to seed here.
    */
-  update(rawY: number, timestampMs: number, confirmDown = true): RepUpdate | null {
+  recalibrate(): void {
+    this.filter.reset();
+    this.minY = Infinity;
+    this.maxY = -Infinity;
+    this.lastCountTimestamp = -Infinity;
+    this.auxConfirmedThisRep = true;
+    this.samplesSeen = 0;
+    this.referenceY = null;
+    this.maxDeviation = 0;
+    this.stage = 'up';
+  }
+
+  /**
+   * Anchors calibration at a deliberately-captured reference value (e.g.
+   * held for a few seconds at the top of the rep before tracking starts)
+   * instead of letting the range emerge from whatever the first few organic
+   * frames happen to be — organic tracking can complete off just a couple
+   * of unrepresentative frames once MIN_CALIBRATION_SAMPLES is satisfied,
+   * which is exactly the failure mode a deliberate reference point is meant
+   * to avoid. Switches update() into deviation-from-reference mode (see
+   * `referenceY`) rather than min/max mode.
+   */
+  seedReference(value: number): void {
+    this.filter.reset();
+    this.referenceY = value;
+    this.maxDeviation = 0;
+    this.lastCountTimestamp = -Infinity;
+    this.auxConfirmedThisRep = true;
+    this.samplesSeen = 0;
+    this.stage = 'up';
+  }
+
+  /**
+   * Feed one frame's raw (unfiltered) vertical position.
+   * @param auxValid secondary per-frame condition (e.g. "legs currently
+   * spread") — true whenever the exercise doesn't need one. OR'd across every
+   * frame of the current "up" phase; the rep only counts if it was true at
+   * least once during that phase, checked when the down-crossing happens.
+   */
+  update(rawY: number, timestampMs: number, auxValid = true): RepUpdate | null {
     const y = this.filter.filter(rawY, timestampMs);
+    this.samplesSeen += 1;
 
-    if (y < this.minY) this.minY = y;
-    if (y > this.maxY) this.maxY = y;
+    let norm: number;
+    if (this.referenceY != null) {
+      // Deviation-from-reference mode (see seedReference): direction-agnostic —
+      // moving further from the reference in *either* direction raises norm.
+      const deviation = Math.abs(y - this.referenceY);
+      if (deviation > this.maxDeviation) this.maxDeviation = deviation;
+      if (this.maxDeviation < this.minCalibrationRange || this.samplesSeen < MIN_CALIBRATION_SAMPLES) {
+        return null;
+      }
+      norm = Math.max(0, Math.min(1, deviation / this.maxDeviation));
+    } else {
+      if (y < this.minY) this.minY = y;
+      if (y > this.maxY) this.maxY = y;
+      const range = this.maxY - this.minY;
+      if (range < this.minCalibrationRange || this.samplesSeen < MIN_CALIBRATION_SAMPLES) return null;
+      norm = Math.max(0, Math.min(1, (y - this.minY) / range));
+    }
 
-    const range = this.maxY - this.minY;
-    if (range < MIN_CALIBRATION_RANGE) return null;
+    if (this.stage === 'up' && auxValid) this.auxConfirmedThisRep = true;
 
-    const norm = Math.max(0, Math.min(1, (y - this.minY) / range));
     let justCounted = false;
 
     if (norm > DOWN_NORM_THRESHOLD && this.stage === 'up') {
       this.stage = 'down';
-      if (confirmDown && timestampMs - this.lastCountTimestamp >= MIN_REP_INTERVAL_MS) {
+      if (this.auxConfirmedThisRep && timestampMs - this.lastCountTimestamp >= MIN_REP_INTERVAL_MS) {
         this.count += 1;
         this.lastCountTimestamp = timestampMs;
         justCounted = true;
       }
     } else if (norm < UP_NORM_THRESHOLD && this.stage === 'down') {
       this.stage = 'up';
+      this.auxConfirmedThisRep = auxValid;
     }
 
     return { progress: norm, stage: this.stage, justCounted };

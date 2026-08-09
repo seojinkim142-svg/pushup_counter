@@ -19,15 +19,18 @@ import {
   SideAngleRepCounter,
   VISIBLE_LANDMARK_INDICES,
   VerticalRepCounter,
-  averageVisibleY,
   isPersonPresent,
+  relativeVisibleY,
   type ExerciseId,
   type Point,
 } from '../lib/pose';
 
-// "lite" trades some accuracy for a much lighter model — the "heavy" variant
-// couldn't keep up with the live camera feed and made the preview stutter.
-const POSE_MODEL = 'pose_landmarker_lite.task';
+// "full" trades some speed for noticeably better landmark accuracy than
+// "lite" — worth it now that GPU delegate + the render fixes give enough
+// fps headroom to absorb the extra inference cost. If fps becomes a problem
+// again, drop back to "lite" before trying "heavy" (much more expensive
+// still, untested on this device).
+const POSE_MODEL = 'pose_landmarker_full.task';
 const VISIBLE_LANDMARK_SET = new Set(VISIBLE_LANDMARK_INDICES);
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const PREVIEW_SIZE = SCREEN_WIDTH;
@@ -39,9 +42,31 @@ const GAUGE_DOT_SIZE = 30;
 type Stage = 'up' | 'down';
 type ScreenPoint = { x: number; y: number; score: number };
 
+// 'idle': not tracking. 'calibrating': counting down while the user gets
+// into the starting position — no posture/counting logic runs yet, only the
+// verticalDisplacement signal's current value is sampled so it can anchor
+// the range once the countdown ends (see CameraScreen's seedReference call).
+// 'tracking': normal operation.
+type Phase = 'idle' | 'calibrating' | 'tracking';
+
+// How long the user gets to settle into the starting position before
+// tracking begins. Deliberately capturing "this moment is the reference
+// point" avoids the contamination that came from letting the calibrated
+// range emerge organically from whatever the first few real frames were
+// (which could be mid-transition, not the true extended/rest position).
+const CALIBRATION_SECONDS = 5;
+
+// How many consecutive invalid-posture frames count as a genuine break
+// (e.g. standing up, repositioning) rather than isValidPosture flickering
+// for a frame or two right at full depth — only a break this long triggers
+// a calibration reset. At roughly 10fps this is ~1-1.5s, comfortably longer
+// than the couple-frame flicker seen mid-rep but much shorter than an
+// actual standing-to-prone transition.
+const REPOSITION_INVALID_FRAMES = 12;
+
 // armCurlTest is a temporary tuning aid (see its comment in pose.ts), not a
 // real workout mode — remove this tab once pushup/squat tuning is done.
-const EXERCISE_ORDER: ExerciseId[] = ['pushup', 'squat', 'armCurlTest'];
+const EXERCISE_ORDER: ExerciseId[] = ['pushup', 'squat', 'jumpingJack', 'armCurlTest'];
 
 const JOINT_RADIUS = 4;
 
@@ -73,6 +98,13 @@ function buildSkeletonJointsPath(points: ScreenPoint[], r: number): string {
     d += `M${p.x - r},${p.y}a${r},${r} 0 1,0 ${2 * r},0a${r},${r} 0 1,0 ${-2 * r},0`;
   }
   return d;
+}
+
+/** Exercises with a small-amplitude verticalDisplacement signal need a smaller calibration-range floor than the default. */
+function createDisplacementCounter(id: ExerciseId): VerticalRepCounter {
+  const config = EXERCISES[id];
+  const minCalibrationRange = config.signal === 'verticalDisplacement' ? config.minCalibrationRange : undefined;
+  return new VerticalRepCounter(undefined, undefined, undefined, minCalibrationRange);
 }
 
 export type SkeletonOverlayHandle = { setTargetPoints: (points: ScreenPoint[]) => void };
@@ -157,7 +189,8 @@ export default function CameraScreen() {
   const [exercise, setExercise] = useState<ExerciseId>('pushup');
   const [count, setCount] = useState(0);
   const [stage, setStage] = useState<Stage>('up');
-  const [isTracking, setIsTracking] = useState(true);
+  const [phase, setPhase] = useState<Phase>('idle');
+  const [calibrationSecondsLeft, setCalibrationSecondsLeft] = useState(CALIBRATION_SECONDS);
   const [postureOk, setPostureOk] = useState(true);
   const [progress, setProgress] = useState<number | null>(null);
   const exerciseConfig = EXERCISES[exercise];
@@ -166,24 +199,48 @@ export default function CameraScreen() {
   // exercise/pause doesn't force react-native-mediapipe to recreate the
   // native pose detector.
   const exerciseRef = useRef<ExerciseId>('pushup');
-  const trackingRef = useRef(true);
+  const phaseRef = useRef<Phase>('idle');
   const stageRef = useRef<Stage>('up');
   const countRef = useRef(0);
-  const displacementCounterRef = useRef(new VerticalRepCounter());
+  const displacementCounterRef = useRef(createDisplacementCounter('pushup'));
   const sideAngleCounterRef = useRef(new SideAngleRepCounter());
   const angleCounterRef = useRef(new AngleRepCounter());
   const skeletonRef = useRef<SkeletonOverlayHandle>(null);
+  // Consecutive frames isValidPosture has been false — used to distinguish a
+  // genuine break from brief flicker (see REPOSITION_INVALID_FRAMES above).
+  const invalidPostureStreakRef = useRef(0);
+  // Latest verticalDisplacement reading seen during the 'calibrating'
+  // countdown — captured every frame so whatever's current when the
+  // countdown ends becomes the seeded reference point.
+  const calibrationYRef = useRef<number | null>(null);
 
   useEffect(() => {
     exerciseRef.current = exercise;
   }, [exercise]);
   useEffect(() => {
-    trackingRef.current = isTracking;
-  }, [isTracking]);
+    phaseRef.current = phase;
+  }, [phase]);
+
+  // Drives the calibration countdown: ticks calibrationSecondsLeft down once
+  // a second, then seeds the displacement counter's reference point (if this
+  // exercise uses one) and switches to 'tracking' once it hits zero.
+  useEffect(() => {
+    if (phase !== 'calibrating') return;
+    if (calibrationSecondsLeft <= 0) {
+      const config = EXERCISES[exerciseRef.current];
+      if (config.signal === 'verticalDisplacement' && calibrationYRef.current != null) {
+        displacementCounterRef.current.seedReference(calibrationYRef.current);
+      }
+      setPhase('tracking');
+      return;
+    }
+    const timer = setTimeout(() => setCalibrationSecondsLeft((s) => s - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [phase, calibrationSecondsLeft]);
 
   const onResults = useCallback(
     (result: PoseDetectionResultBundle, vc: ViewCoordinator) => {
-      if (!trackingRef.current) return;
+      if (phaseRef.current === 'idle') return;
 
       const landmarks = result.results[0]?.landmarks[0] ?? [];
       if (landmarks.length === 0) {
@@ -205,6 +262,16 @@ export default function CameraScreen() {
       // shoulder") needs the rotation-corrected screen-space coordinates
       // from vc.convertPoint instead, or it's comparing the wrong axis.
       const frameDims = vc.getFrameDims(result);
+      // vc.convertPoint returns *view pixel* coordinates (denormalized to
+      // the camera box's actual rendered size), not 0-1 — used as-is below
+      // for drawing the skeleton (which needs real pixel positions), but
+      // every pose.ts threshold (MIN_CALIBRATION_RANGE, posture margins,
+      // spread ratios) is written assuming normalized screen-height units.
+      // Feeding it raw pixel values silently turned those thresholds into
+      // near no-ops (e.g. 0.04 is nothing next to a ~300px gap), which is
+      // why posture/calibration checks kept passing when they shouldn't
+      // have. normScreenPts re-normalizes by PREVIEW_SIZE for that logic;
+      // screenPts stays in pixels for rendering.
       const screenPts: Point[] = personPresent
         ? landmarks.map((lm, i) => {
             if (!VISIBLE_LANDMARK_SET.has(i)) return { x: 0, y: 0, score: 0 };
@@ -212,11 +279,45 @@ export default function CameraScreen() {
             return { x: p.x, y: p.y, score: pts[i].score };
           })
         : [];
+      const normScreenPts: Point[] = screenPts.map((p) => ({
+        x: p.x / PREVIEW_SIZE,
+        y: p.y / PREVIEW_SIZE,
+        score: p.score,
+      }));
+
+      if (phaseRef.current === 'calibrating') {
+        // No posture/counting logic yet — just keep the latest reading
+        // fresh so whatever it is when the countdown ends becomes the
+        // seeded reference (see the countdown effect above).
+        const config = EXERCISES[exerciseRef.current];
+        if (personPresent && config.signal === 'verticalDisplacement') {
+          const y = relativeVisibleY(normScreenPts, config.landmarks, config.referenceLandmarks);
+          if (y != null) calibrationYRef.current = y;
+        }
+        skeletonRef.current?.setTargetPoints(screenPts);
+        return;
+      }
 
       if (personPresent) {
         const config = EXERCISES[exerciseRef.current];
-        const validPosture = config.isValidPosture ? config.isValidPosture(screenPts) : true;
+        const validPosture = config.isValidPosture ? config.isValidPosture(normScreenPts) : true;
         setPostureOk(validPosture);
+
+        if (validPosture) {
+          if (invalidPostureStreakRef.current >= REPOSITION_INVALID_FRAMES && config.signal === 'verticalDisplacement') {
+            // Coming back valid after a *sustained* invalid stretch (e.g.
+            // was standing/getting into position) — discard whatever range
+            // got calibrated before, so real reps are judged against a
+            // fresh range. A brief few-frame flicker (e.g. isValidPosture
+            // wobbling right at full depth) must NOT trigger this — it'd
+            // wipe the range mid-rep, every rep, which is what was
+            // silently breaking counting.
+            displacementCounterRef.current.recalibrate();
+          }
+          invalidPostureStreakRef.current = 0;
+        } else {
+          invalidPostureStreakRef.current += 1;
+        }
 
         if (validPosture) {
           if (config.signal === 'angle') {
@@ -248,13 +349,17 @@ export default function CameraScreen() {
               }
             }
           } else if (config.signal === 'verticalDisplacement') {
-            // Vertical-displacement signal: use rotation-corrected
-            // screen-space Y (screenPts), not the raw sensor-space
-            // landmarks — same reasoning as the posture check above.
-            const y = averageVisibleY(screenPts, config.landmarks);
+            // Vertical-displacement signal: use rotation-corrected,
+            // normalized screen-space Y (normScreenPts), not the raw
+            // sensor-space landmarks — same reasoning as the posture check
+            // above. VerticalRepCounter's calibration-range threshold is
+            // written in normalized units, so this must be normalized too.
+            const y = relativeVisibleY(normScreenPts, config.landmarks, config.referenceLandmarks);
             if (y != null) {
-              const confirmDown = config.depthConfirm ? config.depthConfirm(pts, screenPts) : true;
-              const update = displacementCounterRef.current.update(y, Date.now(), confirmDown);
+              // Evaluated every frame, not just at the count instant —
+              // VerticalRepCounter OR's this across the whole "up" phase.
+              const auxValid = config.depthConfirm ? config.depthConfirm(pts, normScreenPts) : true;
+              const update = displacementCounterRef.current.update(y, Date.now(), auxValid);
               if (update != null) {
                 setProgress(update.progress);
                 if (update.stage !== stageRef.current) {
@@ -297,6 +402,11 @@ export default function CameraScreen() {
       } else {
         setPostureOk(true);
         setProgress(null);
+        // No person at all is at least as much "not in position" as a
+        // failed posture check — count it the same way so a long absence
+        // (walked away, camera lost them) still triggers a recalibration
+        // on return, same as a standing-to-prone transition would.
+        invalidPostureStreakRef.current += 1;
       }
 
       // Feed the child component imperatively (ref call, not state) so this
@@ -333,26 +443,47 @@ export default function CameraScreen() {
     }
   );
 
+  // Full reset: also drops back to 'idle' so resuming requires a fresh
+  // calibration hold — guarantees no stale range ever carries into a new
+  // set, which was the whole point of the deliberate-reference approach.
   const handleReset = () => {
     countRef.current = 0;
     stageRef.current = 'up';
     displacementCounterRef.current.reset();
     sideAngleCounterRef.current.reset();
     angleCounterRef.current.reset();
+    invalidPostureStreakRef.current = 0;
+    calibrationYRef.current = null;
     setCount(0);
     setStage('up');
     setProgress(null);
+    setPhase('idle');
   };
 
   const handleSelectExercise = (id: ExerciseId) => {
     if (id === exercise) return;
     setExercise(id);
     setPostureOk(true);
+    // Different verticalDisplacement exercises can need different
+    // calibration-range floors (see createDisplacementCounter), so rebuild
+    // the counter for the newly selected exercise rather than reusing the
+    // previous one's.
+    displacementCounterRef.current = createDisplacementCounter(id);
     handleReset();
   };
 
   const handleFlipCamera = () => {
     setCameraPosition((p) => (p === 'front' ? 'back' : 'front'));
+  };
+
+  const handleStart = () => {
+    setCalibrationSecondsLeft(CALIBRATION_SECONDS);
+    calibrationYRef.current = null;
+    setPhase('calibrating');
+  };
+
+  const handleStop = () => {
+    setPhase('idle');
   };
 
   if (!hasPermission) {
@@ -394,7 +525,14 @@ export default function CameraScreen() {
           <Text style={styles.cameraSwitchButtonText}>카메라 전환</Text>
         </Pressable>
 
-        {progress != null && (
+        {phase === 'calibrating' && (
+          <View style={styles.calibrationOverlay}>
+            <Text style={styles.calibrationCountdown}>{calibrationSecondsLeft}</Text>
+            <Text style={styles.calibrationHint}>시작 자세를 잡고 잠시 멈춰있어 주세요</Text>
+          </View>
+        )}
+
+        {phase === 'tracking' && progress != null && (
           <View style={styles.gaugeTrack}>
             <View style={[styles.gaugeZone, { flex: 0.2, backgroundColor: '#FF4D4D' }]} />
             <View style={[styles.gaugeZone, { flex: 0.6, backgroundColor: '#3B82F6' }]} />
@@ -415,14 +553,14 @@ export default function CameraScreen() {
         <Text style={styles.stageLabel}>
           {stage === 'down' ? exerciseConfig.downLabel : exerciseConfig.upLabel}
         </Text>
-        {!postureOk && exerciseConfig.postureHint != null && (
+        {phase === 'tracking' && !postureOk && exerciseConfig.postureHint != null && (
           <Text style={styles.postureHint}>{exerciseConfig.postureHint}</Text>
         )}
       </View>
 
       <View style={styles.controls}>
-        <Pressable style={styles.button} onPress={() => setIsTracking((v) => !v)}>
-          <Text style={styles.buttonText}>{isTracking ? '일시정지' : '계속하기'}</Text>
+        <Pressable style={styles.button} onPress={phase === 'idle' ? handleStart : handleStop}>
+          <Text style={styles.buttonText}>{phase === 'idle' ? '시작' : '정지'}</Text>
         </Pressable>
         <Pressable style={[styles.button, styles.buttonSecondary]} onPress={handleReset}>
           <Text style={styles.buttonText}>초기화</Text>
@@ -487,6 +625,29 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '600',
+  },
+  calibrationOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(11,11,15,0.55)',
+    gap: 12,
+  },
+  calibrationCountdown: {
+    color: '#39FF88',
+    fontSize: 96,
+    fontWeight: '800',
+  },
+  calibrationHint: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+    textAlign: 'center',
+    paddingHorizontal: 24,
   },
   gaugeTrack: {
     position: 'absolute',
