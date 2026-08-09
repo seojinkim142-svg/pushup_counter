@@ -56,13 +56,22 @@ type Phase = 'idle' | 'calibrating' | 'tracking';
 // (which could be mid-transition, not the true extended/rest position).
 const CALIBRATION_SECONDS = 5;
 
-// How many consecutive invalid-posture frames count as a genuine break
-// (e.g. standing up, repositioning) rather than isValidPosture flickering
-// for a frame or two right at full depth — only a break this long triggers
-// a calibration reset. At roughly 10fps this is ~1-1.5s, comfortably longer
-// than the couple-frame flicker seen mid-rep but much shorter than an
-// actual standing-to-prone transition.
-const REPOSITION_INVALID_FRAMES = 12;
+// How long a continuous invalid-posture stretch has to last to count as a
+// genuine break (e.g. standing up, repositioning) rather than isValidPosture
+// flickering for a moment right at full depth — only a break this long
+// triggers a calibration reset. Time-based (not a frame count) so it means
+// the same real-world duration regardless of the current detection fps
+// (which on this hardware wanders ~9-12fps and occasionally lower).
+const REPOSITION_INVALID_MS = 1200;
+
+// isValidPosture can flicker false for a moment even mid-rep (e.g. right at
+// full push-up depth, where the torso-orientation/wrist-margin heuristics
+// are closest to their thresholds) — gating counting on it directly meant
+// that frame's data got silently dropped, which read as the gauge "jumping"
+// once the next frame arrived. Tolerating a short invalid stretch (using the
+// last-known-good processing path instead of stopping) smooths that over;
+// only a longer, genuine break should actually pause counting.
+const POSTURE_GRACE_MS = 1000;
 
 // armCurlTest is a temporary tuning aid (see its comment in pose.ts), not a
 // real workout mode — remove this tab once pushup/squat tuning is done.
@@ -182,6 +191,81 @@ const SkeletonOverlay = forwardRef<SkeletonOverlayHandle, { width: number; heigh
   }
 );
 
+export type ProgressGaugeHandle = { setTargetProgress: (progress: number | null) => void };
+
+/**
+ * Same isolation/interpolation trick as SkeletonOverlay, applied to the
+ * depth gauge dot: detection results arrive at ~10fps, so snapping the dot
+ * straight to each new progress value makes it visibly hop between
+ * positions — most noticeably right around a counted rep, where progress,
+ * stage, and count all change in the same detection frame. Tweening between
+ * the last two values over the interval actually observed between them
+ * smooths that out, and doing it in its own leaf component (fed via ref,
+ * not CameraScreen state) keeps those up-to-60fps re-renders from touching
+ * the tabs/counter/buttons the way the skeleton overlay's did before.
+ */
+// eslint-disable-next-line @typescript-eslint/ban-types
+const ProgressGauge = forwardRef<ProgressGaugeHandle, {}>(function ProgressGauge(_props, ref) {
+  const [progress, setProgress] = useState<number | null>(null);
+  const prevRef = useRef<number | null>(null);
+  const prevTimestampRef = useRef(Date.now());
+  const targetRef = useRef<number | null>(null);
+  const targetTimestampRef = useRef(Date.now());
+  const settledRef = useRef(true);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      setTargetProgress(newProgress: number | null) {
+        prevRef.current = targetRef.current;
+        prevTimestampRef.current = targetTimestampRef.current;
+        targetRef.current = newProgress;
+        targetTimestampRef.current = Date.now();
+        settledRef.current = false;
+      },
+    }),
+    []
+  );
+
+  useEffect(() => {
+    let frameId: number;
+
+    const tick = () => {
+      frameId = requestAnimationFrame(tick);
+      if (settledRef.current) return;
+
+      const prev = prevRef.current;
+      const target = targetRef.current;
+      if (prev == null || target == null) {
+        // Gauge appearing/disappearing (person present/absent) — nothing to
+        // interpolate from, so snap.
+        setProgress(target);
+        settledRef.current = true;
+        return;
+      }
+
+      const duration = Math.max(1, targetTimestampRef.current - prevTimestampRef.current);
+      const t = Math.min(1, (Date.now() - targetTimestampRef.current) / duration);
+      setProgress(prev + (target - prev) * t);
+      if (t >= 1) settledRef.current = true;
+    };
+
+    frameId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameId);
+  }, []);
+
+  if (progress == null) return null;
+
+  return (
+    <View style={styles.gaugeTrack}>
+      <View style={[styles.gaugeZone, { flex: 0.2, backgroundColor: '#FF4D4D' }]} />
+      <View style={[styles.gaugeZone, { flex: 0.6, backgroundColor: '#3B82F6' }]} />
+      <View style={[styles.gaugeZone, { flex: 0.2, backgroundColor: '#39FF88' }]} />
+      <View style={[styles.gaugeDot, { top: progress * (GAUGE_HEIGHT - GAUGE_DOT_SIZE) }]} />
+    </View>
+  );
+});
+
 export default function CameraScreen() {
   const { hasPermission, requestPermission } = useCameraPermission();
 
@@ -192,7 +276,6 @@ export default function CameraScreen() {
   const [phase, setPhase] = useState<Phase>('idle');
   const [calibrationSecondsLeft, setCalibrationSecondsLeft] = useState(CALIBRATION_SECONDS);
   const [postureOk, setPostureOk] = useState(true);
-  const [progress, setProgress] = useState<number | null>(null);
   const exerciseConfig = EXERCISES[exercise];
 
   // Read from refs inside the stable onResults callback so switching
@@ -206,9 +289,11 @@ export default function CameraScreen() {
   const sideAngleCounterRef = useRef(new SideAngleRepCounter());
   const angleCounterRef = useRef(new AngleRepCounter());
   const skeletonRef = useRef<SkeletonOverlayHandle>(null);
-  // Consecutive frames isValidPosture has been false — used to distinguish a
-  // genuine break from brief flicker (see REPOSITION_INVALID_FRAMES above).
-  const invalidPostureStreakRef = useRef(0);
+  const progressGaugeRef = useRef<ProgressGaugeHandle>(null);
+  // Timestamp the current invalid-posture stretch started, or null while
+  // posture is (or was very recently) valid — used to distinguish a genuine
+  // break from brief flicker (see REPOSITION_INVALID_MS/POSTURE_GRACE_MS above).
+  const invalidPostureSinceRef = useRef<number | null>(null);
   // Latest verticalDisplacement reading seen during the 'calibrating'
   // countdown — captured every frame so whatever's current when the
   // countdown ends becomes the seeded reference point.
@@ -301,25 +386,39 @@ export default function CameraScreen() {
       if (personPresent) {
         const config = EXERCISES[exerciseRef.current];
         const validPosture = config.isValidPosture ? config.isValidPosture(normScreenPts) : true;
-        setPostureOk(validPosture);
 
         if (validPosture) {
-          if (invalidPostureStreakRef.current >= REPOSITION_INVALID_FRAMES && config.signal === 'verticalDisplacement') {
+          if (
+            invalidPostureSinceRef.current != null &&
+            Date.now() - invalidPostureSinceRef.current >= REPOSITION_INVALID_MS &&
+            config.signal === 'verticalDisplacement'
+          ) {
             // Coming back valid after a *sustained* invalid stretch (e.g.
             // was standing/getting into position) — discard whatever range
             // got calibrated before, so real reps are judged against a
-            // fresh range. A brief few-frame flicker (e.g. isValidPosture
-            // wobbling right at full depth) must NOT trigger this — it'd
-            // wipe the range mid-rep, every rep, which is what was
-            // silently breaking counting.
+            // fresh range. A brief flicker (e.g. isValidPosture wobbling
+            // right at full depth) must NOT trigger this — it'd wipe the
+            // range mid-rep, every rep, which is what was silently breaking
+            // counting.
             displacementCounterRef.current.recalibrate();
           }
-          invalidPostureStreakRef.current = 0;
-        } else {
-          invalidPostureStreakRef.current += 1;
+          invalidPostureSinceRef.current = null;
+        } else if (invalidPostureSinceRef.current == null) {
+          invalidPostureSinceRef.current = Date.now();
         }
 
-        if (validPosture) {
+        // Tolerate a brief invalid stretch (see POSTURE_GRACE_MS) instead of
+        // dropping that frame's data outright — only a longer, genuine break
+        // actually pauses counting or shows the posture hint. Without this,
+        // a flicker right at full depth (heuristics closest to their
+        // thresholds there) both dropped that frame's data (gauge "jumped")
+        // and flashed the hint text on/off every single rep.
+        const shouldProcess =
+          validPosture ||
+          (invalidPostureSinceRef.current != null && Date.now() - invalidPostureSinceRef.current < POSTURE_GRACE_MS);
+        setPostureOk(shouldProcess);
+
+        if (shouldProcess) {
           if (config.signal === 'angle') {
             // Rotation doesn't matter for angle math, so raw sensor-space
             // landmarks (pts) are fine here — same reasoning as sideAngle
@@ -338,7 +437,7 @@ export default function CameraScreen() {
             };
             const update = angleCounterRef.current.update(left, right, Date.now(), config);
             if (update != null) {
-              setProgress(update.progress);
+              progressGaugeRef.current?.setTargetProgress(update.progress);
               if (update.stage !== stageRef.current) {
                 stageRef.current = update.stage;
                 setStage(update.stage);
@@ -361,7 +460,7 @@ export default function CameraScreen() {
               const auxValid = config.depthConfirm ? config.depthConfirm(pts, normScreenPts) : true;
               const update = displacementCounterRef.current.update(y, Date.now(), auxValid);
               if (update != null) {
-                setProgress(update.progress);
+                progressGaugeRef.current?.setTargetProgress(update.progress);
                 if (update.stage !== stageRef.current) {
                   stageRef.current = update.stage;
                   setStage(update.stage);
@@ -387,7 +486,7 @@ export default function CameraScreen() {
             };
             const update = sideAngleCounterRef.current.update(left, right, Date.now());
             if (update != null) {
-              setProgress(update.progress);
+              progressGaugeRef.current?.setTargetProgress(update.progress);
               if (update.stage !== stageRef.current) {
                 stageRef.current = update.stage;
                 setStage(update.stage);
@@ -401,12 +500,12 @@ export default function CameraScreen() {
         }
       } else {
         setPostureOk(true);
-        setProgress(null);
+        progressGaugeRef.current?.setTargetProgress(null);
         // No person at all is at least as much "not in position" as a
         // failed posture check — count it the same way so a long absence
         // (walked away, camera lost them) still triggers a recalibration
         // on return, same as a standing-to-prone transition would.
-        invalidPostureStreakRef.current += 1;
+        if (invalidPostureSinceRef.current == null) invalidPostureSinceRef.current = Date.now();
       }
 
       // Feed the child component imperatively (ref call, not state) so this
@@ -452,11 +551,11 @@ export default function CameraScreen() {
     displacementCounterRef.current.reset();
     sideAngleCounterRef.current.reset();
     angleCounterRef.current.reset();
-    invalidPostureStreakRef.current = 0;
+    invalidPostureSinceRef.current = null;
     calibrationYRef.current = null;
     setCount(0);
     setStage('up');
-    setProgress(null);
+    progressGaugeRef.current?.setTargetProgress(null);
     setPhase('idle');
   };
 
@@ -532,19 +631,7 @@ export default function CameraScreen() {
           </View>
         )}
 
-        {phase === 'tracking' && progress != null && (
-          <View style={styles.gaugeTrack}>
-            <View style={[styles.gaugeZone, { flex: 0.2, backgroundColor: '#FF4D4D' }]} />
-            <View style={[styles.gaugeZone, { flex: 0.6, backgroundColor: '#3B82F6' }]} />
-            <View style={[styles.gaugeZone, { flex: 0.2, backgroundColor: '#39FF88' }]} />
-            <View
-              style={[
-                styles.gaugeDot,
-                { top: progress * (GAUGE_HEIGHT - GAUGE_DOT_SIZE) },
-              ]}
-            />
-          </View>
-        )}
+        {phase === 'tracking' && <ProgressGauge ref={progressGaugeRef} />}
       </View>
 
       <View style={styles.counterCard}>
