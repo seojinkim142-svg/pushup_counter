@@ -1,5 +1,5 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
-import { Dimensions, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Dimensions, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useCameraPermission, type CameraPosition } from 'react-native-vision-camera';
 import {
   Delegate,
@@ -24,6 +24,15 @@ import {
   type ExerciseId,
   type Point,
 } from '../lib/pose';
+import {
+  ADVENTURE_STAGES,
+  STAGE_MONSTER_ART,
+  isStageUnlocked,
+  loadClearedStages,
+  nextStage,
+  saveClearedStage,
+  type StageConfig,
+} from '../lib/adventure';
 
 // "full" trades some speed for noticeably better landmark accuracy than
 // "lite" — worth it now that GPU delegate + the render fixes give enough
@@ -75,8 +84,9 @@ const POSTURE_GRACE_MS = 1000;
 
 // 'practice': no time limit, no red-zone penalty (today's behavior).
 // 'record': 60s time limit; resting in the red zone (gauge top 20%) for too
-// long disqualifies the attempt. 'adventure': stage-based mode, not built
-// yet — the button exists but just explains that for now.
+// long disqualifies the attempt. 'adventure': stage-based mode — clear each
+// stage's target rep count before its own time limit runs out; shares
+// record mode's red-zone/posture disqualification ruleset.
 type Mode = 'practice' | 'record' | 'adventure';
 
 const MODE_LABELS: Record<Mode, string> = {
@@ -85,7 +95,8 @@ const MODE_LABELS: Record<Mode, string> = {
   adventure: '모험모드',
 };
 
-type SessionEndReason = 'time' | 'disqualified';
+// 'cleared': adventure-only — reached the stage's target count in time.
+type SessionEndReason = 'time' | 'disqualified' | 'cleared';
 type SessionResult = { reason: SessionEndReason; count: number; elapsedSec: number };
 
 const RECORD_MODE_SECONDS = 60;
@@ -94,6 +105,12 @@ const RECORD_MODE_SECONDS = 60;
 // drive counting hysteresis and are a different, unrelated pair of cutoffs).
 const RED_ZONE_PROGRESS_THRESHOLD = 0.2;
 const RED_ZONE_DISQUALIFY_MS = 2000;
+// record and adventure both run on a countdown clock with the same
+// red-zone/posture disqualification ruleset — practice is the only mode
+// without either.
+function isTimedMode(mode: Mode | null): boolean {
+  return mode === 'record' || mode === 'adventure';
+}
 
 // armCurlTest is a temporary tuning aid (see its comment in pose.ts), not a
 // real workout mode — remove this tab once pushup/squat tuning is done.
@@ -288,6 +305,54 @@ const ProgressGauge = forwardRef<ProgressGaugeHandle, {}>(function ProgressGauge
   );
 });
 
+/**
+ * Cycles a stage's monster animation frames (see STAGE_MONSTER_ART).
+ * Renders nothing if the stage has no art yet. When `hitSignal` is given and
+ * changes value (pass the live rep count — count changes exactly when a rep
+ * lands), plays the stage's `attacked` clip once before falling back to idle.
+ */
+function MonsterSprite({ stageId, size, hitSignal }: { stageId: string; size: number; hitSignal?: number }) {
+  const art = STAGE_MONSTER_ART[stageId];
+  const [frameIndex, setFrameIndex] = useState(0);
+  const [showAttacked, setShowAttacked] = useState(false);
+  const prevHitSignalRef = useRef(hitSignal);
+
+  // Detect a "hit" (hitSignal went up, e.g. the rep count incrementing) and
+  // switch to the attacked clip for the duration of one playthrough. Only
+  // increases count as a hit — resetting the stage (count dropping back to
+  // 0) shouldn't flash the attacked animation.
+  useEffect(() => {
+    const changed =
+      hitSignal != null && prevHitSignalRef.current != null && hitSignal > prevHitSignalRef.current;
+    prevHitSignalRef.current = hitSignal;
+    if (!changed || art?.attacked == null) return;
+    setShowAttacked(true);
+    const attacked = art.attacked;
+    const timeout = setTimeout(() => setShowAttacked(false), (1000 / attacked.fps) * attacked.frames.length);
+    return () => clearTimeout(timeout);
+  }, [hitSignal, art]);
+
+  const clip = showAttacked ? art?.attacked : art?.idle;
+
+  useEffect(() => {
+    if (clip == null) return;
+    setFrameIndex(0);
+    const interval = setInterval(() => {
+      setFrameIndex((i) => (i + 1) % clip.frames.length);
+    }, 1000 / clip.fps);
+    return () => clearInterval(interval);
+  }, [clip]);
+
+  if (clip == null) return null;
+  return (
+    <Image
+      source={clip.frames[frameIndex]}
+      style={{ width: size, height: size }}
+      resizeMode="contain"
+    />
+  );
+}
+
 export default function CameraScreen() {
   const { hasPermission, requestPermission } = useCameraPermission();
 
@@ -299,9 +364,19 @@ export default function CameraScreen() {
   const [phase, setPhase] = useState<Phase>('idle');
   const [calibrationSecondsLeft, setCalibrationSecondsLeft] = useState(CALIBRATION_SECONDS);
   const [timeLeftSec, setTimeLeftSec] = useState(RECORD_MODE_SECONDS);
+  const [timeLimitSec, setTimeLimitSec] = useState(RECORD_MODE_SECONDS);
   const [sessionResult, setSessionResult] = useState<SessionResult | null>(null);
   const [postureOk, setPostureOk] = useState(true);
+  // Adventure mode only: which stage is selected (null = showing the stage
+  // list) and which stage ids have been cleared, persisted across app
+  // restarts via AsyncStorage.
+  const [selectedStage, setSelectedStage] = useState<StageConfig | null>(null);
+  const [clearedStages, setClearedStages] = useState<ReadonlySet<string>>(new Set());
   const exerciseConfig = EXERCISES[exercise];
+
+  useEffect(() => {
+    loadClearedStages().then(setClearedStages);
+  }, []);
 
   // Read from refs inside the stable onResults callback so switching
   // exercise/pause doesn't force react-native-mediapipe to recreate the
@@ -324,11 +399,27 @@ export default function CameraScreen() {
   // countdown — captured every frame so whatever's current when the
   // countdown ends becomes the seeded reference point.
   const calibrationYRef = useRef<number | null>(null);
-  // Record mode only: when the current continuous red-zone stretch started,
+  // record/adventure: when the current continuous red-zone stretch started,
   // or null while out of the red zone. Timestamp the tracking phase began,
   // used to compute the elapsed time shown on the result screen.
   const redZoneEnteredAtRef = useRef<number | null>(null);
   const sessionStartRef = useRef<number | null>(null);
+  // The current session's time limit, in seconds — RECORD_MODE_SECONDS for
+  // record mode, or the selected stage's own limit for adventure. Read by
+  // endSession to cap the reported elapsed time.
+  const sessionTimeLimitRef = useRef(RECORD_MODE_SECONDS);
+  // Adventure mode only: the rep count that clears the current stage, or
+  // null outside adventure mode (no target to reach, just free counting).
+  const targetCountRef = useRef<number | null>(null);
+  const selectedStageRef = useRef<StageConfig | null>(null);
+  const clearedStagesRef = useRef<ReadonlySet<string>>(new Set());
+
+  useEffect(() => {
+    selectedStageRef.current = selectedStage;
+  }, [selectedStage]);
+  useEffect(() => {
+    clearedStagesRef.current = clearedStages;
+  }, [clearedStages]);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -351,9 +442,20 @@ export default function CameraScreen() {
         displacementCounterRef.current.seedReference(calibrationYRef.current);
       }
       if (modeRef.current === 'record') {
+        sessionTimeLimitRef.current = RECORD_MODE_SECONDS;
+        targetCountRef.current = null;
         sessionStartRef.current = Date.now();
         redZoneEnteredAtRef.current = null;
         setTimeLeftSec(RECORD_MODE_SECONDS);
+        setTimeLimitSec(RECORD_MODE_SECONDS);
+      } else if (modeRef.current === 'adventure' && selectedStageRef.current != null) {
+        const limit = selectedStageRef.current.timeLimitSec;
+        sessionTimeLimitRef.current = limit;
+        targetCountRef.current = selectedStageRef.current.targetCount;
+        sessionStartRef.current = Date.now();
+        redZoneEnteredAtRef.current = null;
+        setTimeLeftSec(limit);
+        setTimeLimitSec(limit);
       }
       setPhase('tracking');
       return;
@@ -362,21 +464,28 @@ export default function CameraScreen() {
     return () => clearTimeout(timer);
   }, [phase, calibrationSecondsLeft]);
 
-  // Ends the current record-mode attempt (time ran out or disqualified) and
-  // shows the result screen. Only reads refs/stable setters, so it's safe to
-  // call from onResults despite that callback's empty dep array.
+  // Ends the current timed attempt (time ran out, disqualified, or — in
+  // adventure mode — the stage's target count was reached) and shows the
+  // result screen. Only reads refs/stable setters, so it's safe to call
+  // from onResults despite that callback's empty dep array.
   const endSession = useCallback((reason: SessionEndReason) => {
     const elapsedSec =
       sessionStartRef.current != null
-        ? Math.min(RECORD_MODE_SECONDS, Math.round((Date.now() - sessionStartRef.current) / 1000))
+        ? Math.min(sessionTimeLimitRef.current, Math.round((Date.now() - sessionStartRef.current) / 1000))
         : 0;
     setSessionResult({ reason, count: countRef.current, elapsedSec });
     setPhase('idle');
+    if (reason === 'cleared' && selectedStageRef.current != null) {
+      const stageId = selectedStageRef.current.id;
+      saveClearedStage(stageId, clearedStagesRef.current).then(() => {
+        setClearedStages((prev) => new Set(prev).add(stageId));
+      });
+    }
   }, []);
 
-  // Record mode's 60s countdown — only runs while actually tracking.
+  // record/adventure's countdown — only runs while actually tracking.
   useEffect(() => {
-    if (mode !== 'record' || phase !== 'tracking') return;
+    if (!isTimedMode(mode) || phase !== 'tracking') return;
     if (timeLeftSec <= 0) {
       endSession('time');
       return;
@@ -432,11 +541,12 @@ export default function CameraScreen() {
         score: p.score,
       }));
 
-      // Feeds the gauge and, in record mode, tracks continuous red-zone
-      // time — disqualifying the attempt if it's spent too long there.
+      // Feeds the gauge and, in record/adventure mode, tracks continuous
+      // red-zone time — disqualifying the attempt if it's spent too long
+      // there.
       const applyProgress = (p: number) => {
         progressGaugeRef.current?.setTargetProgress(p);
-        if (modeRef.current !== 'record') return;
+        if (!isTimedMode(modeRef.current)) return;
         if (p < RED_ZONE_PROGRESS_THRESHOLD) {
           if (redZoneEnteredAtRef.current == null) {
             redZoneEnteredAtRef.current = Date.now();
@@ -449,7 +559,7 @@ export default function CameraScreen() {
       };
 
       // Marks (or extends) the current invalid-posture/no-person stretch,
-      // disqualifying in record mode once it's run long enough. Standing up
+      // disqualifying in record/adventure mode once it's run long enough. Standing up
       // to rest doesn't necessarily land in the gauge's red zone — the
       // seeded reference is wherever the person happened to be at the end
       // of the calibration hold (the exercise's *starting* position), not
@@ -463,10 +573,18 @@ export default function CameraScreen() {
         if (invalidPostureSinceRef.current == null) {
           invalidPostureSinceRef.current = Date.now();
         } else if (
-          modeRef.current === 'record' &&
+          isTimedMode(modeRef.current) &&
           Date.now() - invalidPostureSinceRef.current >= RED_ZONE_DISQUALIFY_MS
         ) {
           endSession('disqualified');
+        }
+      };
+
+      // Adventure mode only: reaching the stage's target count ends the
+      // attempt in success immediately, without waiting for time to run out.
+      const checkAdventureClear = () => {
+        if (targetCountRef.current != null && countRef.current >= targetCountRef.current) {
+          endSession('cleared');
         }
       };
 
@@ -545,6 +663,7 @@ export default function CameraScreen() {
               if (update.justCounted) {
                 countRef.current = angleCounterRef.current.count;
                 setCount(countRef.current);
+                checkAdventureClear();
               }
             }
           } else if (config.signal === 'verticalDisplacement') {
@@ -568,21 +687,26 @@ export default function CameraScreen() {
                 if (update.justCounted) {
                   countRef.current = displacementCounterRef.current.count;
                   setCount(countRef.current);
+                  checkAdventureClear();
                 }
               }
             }
           } else {
-            // Side-angle signal: rotation doesn't matter for angle math, so
-            // raw sensor-space landmarks (pts) are fine here.
+            // Side-angle signal: the knee angle itself is rotation-invariant,
+            // but SideAngleRepCounter also compares hip/knee Y to judge how
+            // far the hip has dropped (depth-ratio check), which needs
+            // actual up/down-on-screen Y — so this must use the
+            // rotation-corrected screenPts, not raw sensor-space pts (same
+            // reasoning as the verticalDisplacement branch above).
             const left = {
-              hip: pts[config.left[0]],
-              knee: pts[config.left[1]],
-              ankle: pts[config.left[2]],
+              hip: screenPts[config.left[0]],
+              knee: screenPts[config.left[1]],
+              ankle: screenPts[config.left[2]],
             };
             const right = {
-              hip: pts[config.right[0]],
-              knee: pts[config.right[1]],
-              ankle: pts[config.right[2]],
+              hip: screenPts[config.right[0]],
+              knee: screenPts[config.right[1]],
+              ankle: screenPts[config.right[2]],
             };
             const update = sideAngleCounterRef.current.update(left, right, Date.now());
             if (update != null) {
@@ -594,6 +718,7 @@ export default function CameraScreen() {
               if (update.justCounted) {
                 countRef.current = sideAngleCounterRef.current.count;
                 setCount(countRef.current);
+                checkAdventureClear();
               }
             }
           }
@@ -657,16 +782,37 @@ export default function CameraScreen() {
     calibrationYRef.current = null;
     redZoneEnteredAtRef.current = null;
     sessionStartRef.current = null;
+    sessionTimeLimitRef.current = RECORD_MODE_SECONDS;
+    // Always cleared, not just outside adventure mode — otherwise a leftover
+    // target from a previous stage attempt could trigger checkAdventureClear
+    // after switching to practice/record.
+    targetCountRef.current = null;
     setCount(0);
     setStage('up');
     progressGaugeRef.current?.setTargetProgress(null);
     setPhase('idle');
     setTimeLeftSec(RECORD_MODE_SECONDS);
+    setTimeLimitSec(RECORD_MODE_SECONDS);
     setSessionResult(null);
+  };
+
+  // Adventure mode: enter a stage's intro/idle screen (still requires
+  // pressing 시작 to begin the calibration hold, same as every other mode).
+  const handleSelectStage = (targetStage: StageConfig) => {
+    setSelectedStage(targetStage);
+    setExercise(targetStage.exercise);
+    setPostureOk(true);
+    displacementCounterRef.current = createDisplacementCounter(targetStage.exercise);
+    handleReset();
   };
 
   const handleSelectExercise = (id: ExerciseId) => {
     if (id === exercise) return;
+    // Switching exercise rebuilds the counters via handleReset(), which also
+    // drops the phase back to 'idle' — mid-run (calibrating or tracking)
+    // that would silently abandon a timed attempt with no result screen and
+    // no failure recorded. Require stopping first.
+    if (phase !== 'idle') return;
     setExercise(id);
     setPostureOk(true);
     // Different verticalDisplacement exercises can need different
@@ -682,7 +828,11 @@ export default function CameraScreen() {
   };
 
   const handleStart = () => {
-    setSessionResult(null);
+    // Retrying (다시하기) after a finished attempt previously left the old
+    // count/counters in place — the display wouldn't visibly reset to 0
+    // until the first new rep landed, and that rep would land on top of the
+    // stale internal count. A fresh attempt always starts from a clean slate.
+    handleReset();
     setCalibrationSecondsLeft(CALIBRATION_SECONDS);
     calibrationYRef.current = null;
     setPhase('calibrating');
@@ -708,16 +858,38 @@ export default function CameraScreen() {
         </Pressable>
         <Pressable style={styles.modeButton} onPress={() => setMode('adventure')}>
           <Text style={styles.modeButtonTitle}>모험모드</Text>
-          <Text style={styles.modeButtonDesc}>준비 중이에요</Text>
+          <Text style={styles.modeButtonDesc}>스테이지를 하나씩 깨며 성장해요</Text>
         </Pressable>
       </View>
     );
   }
 
-  if (mode === 'adventure') {
+  if (mode === 'adventure' && selectedStage == null) {
     return (
       <View style={styles.center}>
-        <Text style={styles.hint}>모험모드는 아직 준비 중이에요!</Text>
+        <Text style={styles.modeSelectTitle}>1장</Text>
+        {ADVENTURE_STAGES.map((s) => {
+          const unlocked = isStageUnlocked(s, clearedStages);
+          const isCleared = clearedStages.has(s.id);
+          return (
+            <Pressable
+              key={s.id}
+              style={[styles.modeButton, styles.stageButtonRow, !unlocked && styles.modeButtonLocked]}
+              disabled={!unlocked}
+              onPress={() => handleSelectStage(s)}
+            >
+              <MonsterSprite stageId={s.id} size={48} />
+              <View style={styles.stageButtonText}>
+                <Text style={styles.modeButtonTitle}>
+                  {s.label} {isCleared ? '✓' : !unlocked ? '🔒' : ''}
+                </Text>
+                <Text style={styles.modeButtonDesc}>
+                  {EXERCISES[s.exercise].label} {s.targetCount}회 · {s.timeLimitSec}초 안에
+                </Text>
+              </View>
+            </Pressable>
+          );
+        })}
         <Pressable style={styles.button} onPress={() => setMode(null)}>
           <Text style={styles.buttonText}>모드 선택으로</Text>
         </Pressable>
@@ -736,6 +908,32 @@ export default function CameraScreen() {
     );
   }
 
+  // Precompute the result overlay's text/buttons — reason alone is
+  // ambiguous in adventure mode ('time'/'disqualified' both mean "failed
+  // this attempt", 'cleared' means success with a "next stage" option).
+  let resultTitle = '';
+  let resultShowsNext = false;
+  if (sessionResult != null) {
+    if (mode === 'adventure') {
+      if (sessionResult.reason === 'cleared') {
+        resultTitle = '스테이지 클리어!';
+        resultShowsNext = selectedStage != null && nextStage(selectedStage) != null;
+      } else if (sessionResult.reason === 'disqualified') {
+        resultTitle = '자세 이탈로 실패...';
+      } else {
+        resultTitle = '시간 종료... 실패';
+      }
+    } else {
+      resultTitle = sessionResult.reason === 'time' ? '시간 종료!' : '레드존 초과로 탈락!';
+    }
+  }
+
+  // Boss HUD (adventure only): each rep "hits" the stage's monster — its HP
+  // is the reps still needed to clear, draining to 0 as count climbs toward
+  // the target.
+  const bossHp = selectedStage != null ? Math.max(0, selectedStage.targetCount - count) : 0;
+  const bossHpPercent = selectedStage != null && selectedStage.targetCount > 0 ? (bossHp / selectedStage.targetCount) * 100 : 100;
+
   return (
     <View style={styles.container}>
       <View style={styles.topBar}>
@@ -743,25 +941,43 @@ export default function CameraScreen() {
           style={styles.backButton}
           onPress={() => {
             handleStop();
-            setMode(null);
+            if (mode === 'adventure') {
+              setSelectedStage(null);
+            } else {
+              setMode(null);
+            }
           }}
         >
-          <Text style={styles.backButtonText}>‹ {mode != null ? MODE_LABELS[mode] : '모드'}</Text>
+          <Text style={styles.backButtonText}>
+            ‹ {mode === 'adventure' ? selectedStage?.label ?? '모험모드' : mode != null ? MODE_LABELS[mode] : '모드'}
+          </Text>
         </Pressable>
         <View style={styles.exerciseTabs}>
-          {EXERCISE_ORDER.map((id) => (
-            <Pressable
-              key={id}
-              style={[styles.tab, exercise === id && styles.tabActive]}
-              onPress={() => handleSelectExercise(id)}
-            >
-              <Text style={[styles.tabText, exercise === id && styles.tabTextActive]}>
-                {EXERCISES[id].label}
-              </Text>
-            </Pressable>
-          ))}
+          {/* armCurlTest is a tuning aid, not a real workout — hide it in
+              adventure mode's tab bar (record/practice can still reach it). */}
+          {(mode === 'adventure' ? EXERCISE_ORDER.filter((id) => id !== 'armCurlTest') : EXERCISE_ORDER).map(
+            (id) => (
+              <Pressable
+                key={id}
+                style={[styles.tab, exercise === id && styles.tabActive, phase !== 'idle' && styles.tabDisabled]}
+                disabled={phase !== 'idle'}
+                onPress={() => handleSelectExercise(id)}
+              >
+                <Text style={[styles.tabText, exercise === id && styles.tabTextActive]}>
+                  {EXERCISES[id].label}
+                </Text>
+              </Pressable>
+            )
+          )}
         </View>
       </View>
+      {mode === 'adventure' && selectedStage != null && (
+        // The stage still sets its own target count/time limit — only the
+        // exercise used to reach it is now free to switch (see tabs above).
+        <Text style={styles.stageInfoText}>
+          {selectedStage.targetCount}회 · {selectedStage.timeLimitSec}초 안에
+        </Text>
+      )}
 
       <View style={[styles.cameraBox, { width: PREVIEW_SIZE, height: PREVIEW_SIZE }]}>
         <MediapipeCamera
@@ -775,14 +991,27 @@ export default function CameraScreen() {
           <Text style={styles.cameraSwitchButtonText}>카메라 전환</Text>
         </Pressable>
 
-        {mode === 'record' && phase === 'tracking' && (
+        {mode === 'adventure' && selectedStage != null && (
+          <View style={styles.bossCard}>
+            <View style={styles.bossPortrait}>
+              <MonsterSprite stageId={selectedStage.id} size={104} hitSignal={count} />
+            </View>
+            <Text style={styles.bossName}>
+              {EXERCISES[exercise].label} {selectedStage.label}
+            </Text>
+            <View style={styles.bossHpTrack}>
+              <View style={[styles.bossHpFill, { width: `${bossHpPercent}%` }]} />
+              <Text style={styles.bossHpText}>{bossHp} HP</Text>
+            </View>
+          </View>
+        )}
+
+        {isTimedMode(mode) && phase === 'tracking' && (
           // A shrinking bar reads at a glance from across a room — the
           // "30초" text badge this replaced turned out to be unreadable
           // from normal workout distance.
           <View style={styles.recordTimerBarTrack}>
-            <View
-              style={[styles.recordTimerBarFill, { width: `${(timeLeftSec / RECORD_MODE_SECONDS) * 100}%` }]}
-            />
+            <View style={[styles.recordTimerBarFill, { width: `${(timeLeftSec / timeLimitSec) * 100}%` }]} />
           </View>
         )}
 
@@ -797,32 +1026,79 @@ export default function CameraScreen() {
 
         {sessionResult != null && (
           <View style={styles.calibrationOverlay}>
-            <Text style={styles.resultTitle}>
-              {sessionResult.reason === 'time' ? '시간 종료!' : '레드존 초과로 탈락!'}
+            {mode === 'adventure' && sessionResult.reason === 'cleared' && selectedStage != null && (
+              <MonsterSprite stageId={selectedStage.id} size={96} />
+            )}
+            <Text style={styles.resultTitle}>{resultTitle}</Text>
+            <Text style={styles.resultStats}>
+              {sessionResult.count}
+              {mode === 'adventure' && selectedStage != null ? ` / ${selectedStage.targetCount}` : ''}회
             </Text>
-            <Text style={styles.resultStats}>{sessionResult.count}회</Text>
             <Text style={styles.calibrationHint}>{sessionResult.elapsedSec}초 동안 기록</Text>
-            <View style={styles.controls}>
-              <Pressable style={styles.button} onPress={handleStart}>
-                <Text style={styles.buttonText}>다시하기</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.button, styles.buttonSecondary]}
-                onPress={() => {
-                  handleReset();
-                  setMode(null);
-                }}
-              >
-                <Text style={styles.buttonText}>모드 선택</Text>
-              </Pressable>
-            </View>
+            {mode === 'adventure' ? (
+              <View style={styles.controls}>
+                {sessionResult.reason === 'cleared' ? (
+                  <>
+                    {resultShowsNext && selectedStage != null && (
+                      <Pressable
+                        style={styles.button}
+                        onPress={() => {
+                          const next = nextStage(selectedStage);
+                          if (next != null) handleSelectStage(next);
+                        }}
+                      >
+                        <Text style={styles.buttonText}>다음 스테이지</Text>
+                      </Pressable>
+                    )}
+                    <Pressable
+                      style={[styles.button, resultShowsNext && styles.buttonSecondary]}
+                      onPress={handleStart}
+                    >
+                      <Text style={styles.buttonText}>다시하기</Text>
+                    </Pressable>
+                  </>
+                ) : (
+                  <>
+                    <Pressable style={styles.button} onPress={handleStart}>
+                      <Text style={styles.buttonText}>다시하기</Text>
+                    </Pressable>
+                    <Pressable
+                      style={[styles.button, styles.buttonSecondary]}
+                      onPress={() => setSelectedStage(null)}
+                    >
+                      <Text style={styles.buttonText}>스테이지 선택</Text>
+                    </Pressable>
+                  </>
+                )}
+              </View>
+            ) : (
+              <View style={styles.controls}>
+                <Pressable style={styles.button} onPress={handleStart}>
+                  <Text style={styles.buttonText}>다시하기</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.button, styles.buttonSecondary]}
+                  onPress={() => {
+                    handleReset();
+                    setMode(null);
+                  }}
+                >
+                  <Text style={styles.buttonText}>모드 선택</Text>
+                </Pressable>
+              </View>
+            )}
           </View>
         )}
       </View>
 
       <View style={styles.counterCard}>
         <Text style={styles.countLabel}>{exerciseConfig.label.toUpperCase()}</Text>
-        <Text style={styles.countValue}>{count}</Text>
+        <Text style={styles.countValue}>
+          {count}
+          {mode === 'adventure' && selectedStage != null && (
+            <Text style={styles.countTarget}> / {selectedStage.targetCount}</Text>
+          )}
+        </Text>
         <Text style={styles.stageLabel}>
           {stage === 'down' ? exerciseConfig.downLabel : exerciseConfig.upLabel}
         </Text>
@@ -902,6 +1178,25 @@ const styles = StyleSheet.create({
     color: '#8A8A93',
     fontSize: 13,
   },
+  modeButtonLocked: {
+    opacity: 0.4,
+  },
+  stageButtonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+  },
+  stageButtonText: {
+    flex: 1,
+    gap: 6,
+  },
+  stageInfoText: {
+    color: '#8A8A93',
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: -6,
+    marginBottom: 8,
+  },
   recordTimerBarTrack: {
     position: 'absolute',
     top: 0,
@@ -913,6 +1208,53 @@ const styles = StyleSheet.create({
   recordTimerBarFill: {
     height: '100%',
     backgroundColor: '#39FF88',
+  },
+  bossCard: {
+    position: 'absolute',
+    top: 20,
+    alignSelf: 'center',
+    width: 280,
+    alignItems: 'center',
+    backgroundColor: 'rgba(11,11,15,0.7)',
+    borderRadius: 20,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    gap: 8,
+  },
+  bossPortrait: {
+    width: 116,
+    height: 116,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bossName: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  bossHpTrack: {
+    width: '100%',
+    height: 18,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    overflow: 'hidden',
+    justifyContent: 'center',
+  },
+  bossHpFill: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    bottom: 0,
+    backgroundColor: '#FF4D4D',
+    borderRadius: 999,
+  },
+  bossHpText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   resultTitle: {
     color: '#FFFFFF',
@@ -932,6 +1274,9 @@ const styles = StyleSheet.create({
   },
   tabActive: {
     backgroundColor: '#39FF88',
+  },
+  tabDisabled: {
+    opacity: 0.4,
   },
   tabText: {
     color: '#8A8A93',
@@ -1019,6 +1364,11 @@ const styles = StyleSheet.create({
     color: '#39FF88',
     fontSize: 88,
     fontWeight: '800',
+  },
+  countTarget: {
+    color: '#8A8A93',
+    fontSize: 32,
+    fontWeight: '700',
   },
   stageLabel: {
     color: '#FFFFFF',

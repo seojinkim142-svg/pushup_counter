@@ -638,11 +638,33 @@ export type AngleRepUpdate = { angle: number; progress: number; stage: 'up' | 'd
 // observed to trust dynamic calibration.
 const SIDE_ANGLE_DOWN_FALLBACK = 100;
 const SIDE_ANGLE_UP_FALLBACK = 160;
-const SIDE_ANGLE_DEPTH_FALLBACK = 90;
 const SIDE_ANGLE_MIN_CALIBRATION_RANGE = 20; // degrees
 const SIDE_ANGLE_DOWN_FRACTION = 0.3; // from the straight/top end
 const SIDE_ANGLE_UP_FRACTION = 0.15;
-const SIDE_ANGLE_DEPTH_FRACTION = 0.15; // from the bent/bottom end
+// Full-depth requirement for a rep to count. Fixed (not derived from the
+// self-calibrated min/max range) on purpose: a dynamic "reached 15% short of
+// whatever the deepest observed angle was" threshold quietly re-anchors to
+// shallow squats if that's all the person has done so far, so a string of
+// half-squats ends up counting itself as "full depth". A real squat brings
+// the knee angle to roughly parallel-thigh (~90-100°), so require that
+// regardless of what's been observed this session.
+const SIDE_ANGLE_DEPTH_ABSOLUTE_DEG = 100;
+// Second, independent depth check: how far the hip has dropped toward knee
+// height, normalized by thigh length so it doesn't depend on distance from
+// the camera. 0 = hip level with knee (thighs parallel to the ground, the
+// standard "full squat" depth); positive = hip still above knee (shallow).
+// Knee angle alone drifts with leg proportions and exact stance, so
+// requiring both this AND the angle threshold catches shallow squats (and
+// posture faults like bending only at the hips) that either check alone
+// could miss.
+const SIDE_ANGLE_DEPTH_RATIO_THRESHOLD = 0.1;
+// The gauge's green zone starts at progress 0.8 (see ProgressGauge's
+// gaugeZone flex values in CameraScreen.tsx). Cap displayed progress just
+// below that whenever hasDepth is false so the gauge can't visually read
+// "full depth" purely from the knee angle while the hip-drop check hasn't
+// actually passed yet — otherwise the gauge and the count criteria disagree
+// about what counts as deep enough.
+const SIDE_ANGLE_PROGRESS_CEILING_WITHOUT_DEPTH = 0.78;
 
 /**
  * Rep counter for a side-on camera view, driven by knee (hip-knee-ankle)
@@ -653,17 +675,18 @@ const SIDE_ANGLE_DEPTH_FRACTION = 0.15; // from the bent/bottom end
  * from the side, the far leg is partly self-occluded — so it auto-adapts to
  * whichever way the person is facing without needing to be told.
  *
- * Counts on the classic down→up transition (squat back to standing), and
- * only if the knee angle actually reached full depth at some point during
- * the descent — otherwise a half-squat still moves the gauge but doesn't
- * count.
+ * Counts the instant full depth (hasDepth) is reached during the descent —
+ * in sync with the gauge entering its green zone — rather than waiting for
+ * the return to standing, so the numeric count and the visual "you're deep
+ * enough" moment land together. A half-squat that never reaches full depth
+ * still moves the gauge but never counts.
  */
 export class SideAngleRepCounter {
   private filters: Record<'hipX' | 'hipY' | 'kneeX' | 'kneeY' | 'ankleX' | 'ankleY', OneEuroFilter>;
   private selectedSide: 'left' | 'right' | null = null;
   private minAngleSeen = Infinity;
   private maxAngleSeen = -Infinity;
-  private minAngleThisRep = Infinity;
+  private reachedDepthThisRep = false;
   private lastCountTimestamp = -Infinity;
   stage: 'up' | 'down' = 'up';
   count = 0;
@@ -684,7 +707,7 @@ export class SideAngleRepCounter {
     this.selectedSide = null;
     this.minAngleSeen = Infinity;
     this.maxAngleSeen = -Infinity;
-    this.minAngleThisRep = Infinity;
+    this.reachedDepthThisRep = false;
     this.lastCountTimestamp = -Infinity;
     this.stage = 'up';
     this.count = 0;
@@ -724,40 +747,71 @@ export class SideAngleRepCounter {
 
     const angle = angleDegrees(hipX, hipY, kneeX, kneeY, ankleX, ankleY);
 
+    const thigh = Math.hypot(kneeX - hipX, kneeY - hipY);
+    // thigh is near-zero only for degenerate/unusable landmarks (hip and
+    // knee collapsed onto each other); treat that as "not deep" rather than
+    // dividing by ~0.
+    const depthRatio = thigh > 1e-6 ? (kneeY - hipY) / thigh : Infinity;
+    const hasDepth = angle <= SIDE_ANGLE_DEPTH_ABSOLUTE_DEG && depthRatio <= SIDE_ANGLE_DEPTH_RATIO_THRESHOLD;
+
     if (angle < this.minAngleSeen) this.minAngleSeen = angle;
     if (angle > this.maxAngleSeen) this.maxAngleSeen = angle;
     const range = this.maxAngleSeen - this.minAngleSeen;
 
     let downThreshold = SIDE_ANGLE_DOWN_FALLBACK;
     let upThreshold = SIDE_ANGLE_UP_FALLBACK;
-    let depthThreshold = SIDE_ANGLE_DEPTH_FALLBACK;
     if (range >= SIDE_ANGLE_MIN_CALIBRATION_RANGE) {
       downThreshold = this.maxAngleSeen - SIDE_ANGLE_DOWN_FRACTION * range;
       upThreshold = this.maxAngleSeen - SIDE_ANGLE_UP_FRACTION * range;
-      depthThreshold = this.minAngleSeen + SIDE_ANGLE_DEPTH_FRACTION * range;
     }
+    // Keep the "down" entry comfortably above the fixed depth requirement —
+    // otherwise a dynamically-calibrated downThreshold that drifts at or
+    // below the depth angle would let a frame cross straight from "up" to
+    // past full depth in one step, skipping the depth-tracking done in the
+    // 'down' branch below.
+    downThreshold = Math.max(downThreshold, SIDE_ANGLE_DEPTH_ABSOLUTE_DEG + 30);
+    // upThreshold needs the same floor: someone who never fully locks out
+    // (calibrated max angle stays low, e.g. ~104°) can otherwise pull it
+    // down to/below the depth angle, which makes progress's denominator
+    // (upThreshold - depthAngle) zero or negative — the gauge then reads
+    // stuck at 0 for the whole rep even at real depth. Anchoring it above
+    // downThreshold also keeps the up/down hysteresis band from collapsing.
+    upThreshold = Math.max(upThreshold, downThreshold + 10);
 
     let justCounted = false;
 
     if (angle < downThreshold && this.stage === 'up') {
       this.stage = 'down';
-      this.minAngleThisRep = angle;
-    } else if (this.stage === 'down') {
-      if (angle < this.minAngleThisRep) this.minAngleThisRep = angle;
-      if (angle > upThreshold) {
-        this.stage = 'up';
-        if (
-          this.minAngleThisRep <= depthThreshold &&
-          timestampMs - this.lastCountTimestamp >= MIN_REP_INTERVAL_MS
-        ) {
+      this.reachedDepthThisRep = false;
+    }
+    if (this.stage === 'down') {
+      // Count the instant hasDepth first turns true — in sync with the
+      // gauge entering green — instead of waiting for the return to
+      // standing. reachedDepthThisRep still gates it to once per descent so
+      // lingering or bouncing at depth doesn't rack up extra counts.
+      if (hasDepth && !this.reachedDepthThisRep) {
+        this.reachedDepthThisRep = true;
+        if (timestampMs - this.lastCountTimestamp >= MIN_REP_INTERVAL_MS) {
           this.count += 1;
           this.lastCountTimestamp = timestampMs;
           justCounted = true;
         }
       }
+      if (angle > upThreshold) {
+        this.stage = 'up';
+      }
     }
 
-    const progress = Math.max(0, Math.min(1, (upThreshold - angle) / (upThreshold - downThreshold)));
+    // Anchored to the fixed depth angle (not the dynamically-calibrated
+    // downThreshold) so the gauge doesn't read "full depth" just because
+    // the person's deepest squat so far happened to be shallow.
+    let progress = Math.max(
+      0,
+      Math.min(1, (upThreshold - angle) / (upThreshold - SIDE_ANGLE_DEPTH_ABSOLUTE_DEG))
+    );
+    if (!hasDepth) {
+      progress = Math.min(progress, SIDE_ANGLE_PROGRESS_CEILING_WITHOUT_DEPTH);
+    }
 
     return { angle, progress, stage: this.stage, justCounted };
   }

@@ -462,6 +462,16 @@ function holdAngle(
   return { last, t };
 }
 
+function holdLeg(counter: SideAngleRepCounter, leg: LegTriple, startT: number, frames = 8) {
+  let t = startT;
+  let last = null as ReturnType<SideAngleRepCounter['update']>;
+  for (let i = 0; i < frames; i++) {
+    last = counter.update(leg, leg, t);
+    t += FRAME_DT_MS;
+  }
+  return { last, t };
+}
+
 describe('SideAngleRepCounter', () => {
   it('returns null when neither leg is confidently visible', () => {
     const counter = new SideAngleRepCounter();
@@ -479,6 +489,88 @@ describe('SideAngleRepCounter', () => {
     expect(counter.stage).toBe('up');
   });
 
+  it('does not report gauge progress in the green zone (>=0.8) until the depth-ratio check actually passes', () => {
+    const counter = new SideAngleRepCounter();
+    let t = 0;
+    ({ t } = holdAngle(counter, 170, t)); // standing
+    // Knee angle alone reads deep-ish (past the fixed 100° requirement)
+    // but the hip hasn't dropped, so hasDepth is false via the ratio gate.
+    const fakeDeepLeg: LegTriple = {
+      knee: point(0, 0),
+      hip: point(0, -3),
+      ankle: point(3, 0.01),
+    };
+    const { last } = holdLeg(counter, fakeDeepLeg, t, 8);
+    expect(last?.progress).toBeLessThan(0.8);
+  });
+
+  it('still reports full gauge progress at real depth even when the calibrated max angle never straightens much past 100°', () => {
+    // Regression test: upThreshold (maxAngleSeen - 0.15*range) used to be
+    // unclamped, so someone whose "standing" never reads much above the
+    // fixed 100° depth angle could drive it to/below 100 — making
+    // progress's (upThreshold - 100) denominator zero or negative and
+    // sticking the gauge at 0 for the whole rep despite real depth.
+    const counter = new SideAngleRepCounter();
+    let t = 0;
+    ({ t } = holdAngle(counter, 104, t, 15)); // "standing" barely above the depth angle
+    ({ t } = holdAngle(counter, 70, t, 15)); // deep squat
+    const last = holdAngle(counter, 85, t, 1).last; // still descending, real depth
+    expect(last?.progress).toBeGreaterThan(0.5);
+  });
+
+  it('counts the instant full depth is reached, not after standing back up', () => {
+    const counter = new SideAngleRepCounter();
+    let t = 0;
+    ({ t } = holdAngle(counter, 170, t)); // standing, straight leg
+    // Reach and hold at depth: the count should land during this call,
+    // before any frame reports the person back near standing.
+    const { t: t2 } = holdAngle(counter, 70, t);
+    expect(counter.count).toBe(1);
+    t = t2;
+    holdAngle(counter, 170, t); // stand back up — should not double-count
+    expect(counter.count).toBe(1);
+  });
+
+  it('counts a rep that reaches full depth even if it never stands back up', () => {
+    const counter = new SideAngleRepCounter();
+    let t = 0;
+    ({ t } = holdAngle(counter, 170, t));
+    holdAngle(counter, 70, t); // reaches full depth and stays there
+    expect(counter.count).toBe(1);
+  });
+
+  it('counts a genuine full squat where the hip drops to knee height', () => {
+    const counter = new SideAngleRepCounter();
+    let t = 0;
+    // Standing tall: hip well above the knee, shin roughly vertical.
+    const standing: LegTriple = { knee: point(0, 0), hip: point(0.05, -3), ankle: point(0, 3) };
+    // Full depth: hip has dropped to knee height (thighs parallel), while
+    // the knee angle also reads a real bend — both signals agree here.
+    const squatting: LegTriple = { knee: point(0, 0), hip: point(3, 0), ankle: point(0, 3) };
+    ({ t } = holdLeg(counter, standing, t));
+    ({ t } = holdLeg(counter, squatting, t));
+    holdLeg(counter, standing, t);
+    expect(counter.count).toBe(1);
+  });
+
+  it('does not count a bent knee-angle reading if the hip never actually drops (depth ratio guard)', () => {
+    const counter = new SideAngleRepCounter();
+    let t = 0;
+    const standing = legAtAngle(170);
+    // Constructed so the knee angle alone reads ~90° (would pass the old
+    // angle-only depth check) but the hip is still well above the knee —
+    // e.g. a sideways leg motion, not an actual squat.
+    const fakeDeepLeg: LegTriple = {
+      knee: point(0, 0),
+      hip: point(0, -3), // hip well above the knee
+      ankle: point(3, 0.01), // angled so hip-knee-ankle still reads ~90°
+    };
+    ({ t } = holdLeg(counter, standing, t));
+    ({ t } = holdLeg(counter, fakeDeepLeg, t));
+    holdLeg(counter, standing, t);
+    expect(counter.count).toBe(0);
+  });
+
   it('does not count a half squat that never reaches full depth', () => {
     const counter = new SideAngleRepCounter();
     let t = 0;
@@ -492,6 +584,20 @@ describe('SideAngleRepCounter', () => {
     ({ t } = holdAngle(counter, 110, t));
     holdAngle(counter, 170, t);
     expect(counter.count).toBe(1); // unchanged
+  });
+
+  it('never counts repeated shallow squats, even once they are the only depth observed', () => {
+    // Regression test: the depth requirement used to be derived from the
+    // self-calibrated min/max range (15% short of the deepest angle ever
+    // seen), so once a person had only ever done shallow squats, that
+    // shallow depth itself became "full depth" and started counting.
+    const counter = new SideAngleRepCounter();
+    let t = 0;
+    for (let i = 0; i < 5; i++) {
+      ({ t } = holdAngle(counter, 170, t)); // stand
+      ({ t } = holdAngle(counter, 130, t)); // shallow squat, never near parallel
+    }
+    expect(counter.count).toBe(0);
   });
 
   it('reset() clears count, stage, and calibration', () => {
@@ -539,8 +645,10 @@ describe('SideAngleRepCounter', () => {
     counter.update(standing, standing, 0);
     const firstDown = counter.update(deepSquat, deepSquat, FRAME_DT_MS);
     expect(firstDown?.stage).toBe('down');
+    expect(firstDown?.justCounted).toBe(true); // counts as soon as depth is reached
+    expect(counter.count).toBe(1);
     const firstUp = counter.update(standing, standing, 2 * FRAME_DT_MS);
-    expect(firstUp?.justCounted).toBe(true);
+    expect(firstUp?.justCounted).toBe(false); // already counted on the way down
     expect(counter.count).toBe(1);
 
     // Bounce straight back down and up again well inside the 400ms window.
