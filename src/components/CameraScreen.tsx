@@ -1092,8 +1092,8 @@ const styles = StyleSheet.create({
     width: '100%',
     position: 'relative',
     alignItems: 'flex-start',
-    paddingTop: 24,
-    paddingBottom: 16,
+    paddingTop: 36,
+    paddingBottom: 32,
     paddingHorizontal: 24,
     backgroundColor: '#FFFFFF',
     borderBottomWidth: 1,
@@ -1110,7 +1110,7 @@ const styles = StyleSheet.create({
   },
   stageListTopBarTitle: {
     color: TEXT_PRIMARY,
-    fontSize: 18,
+    fontSize: 22,
     fontWeight: '800',
   },
   chapterNavRow: {
