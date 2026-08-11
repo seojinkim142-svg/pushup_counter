@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Dimensions, Pressable, StyleSheet, Text, View } from 'react-native';
+import { BackHandler, Dimensions, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useCameraPermission, type CameraPosition } from 'react-native-vision-camera';
 import {
   Delegate,
@@ -95,7 +95,16 @@ const MODE_LABELS: Record<Mode, string> = {
 type SessionEndReason = 'time' | 'disqualified' | 'cleared';
 type SessionResult = { reason: SessionEndReason; count: number; elapsedSec: number };
 
-const RECORD_MODE_SECONDS = 60;
+const RECORD_MODE_SECONDS = 60; // fallback before a duration is chosen
+const RECORD_TIME_OPTIONS = [30, 60, 90, 120];
+
+function formatRecordDuration(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  if (minutes === 0) return `${secs}초`;
+  if (secs === 0) return `${minutes}분`;
+  return `${minutes}분 ${secs}초`;
+}
 // Matches the gauge's visual red zone (top 20% — see gaugeZone flex values
 // in ProgressGauge below), not DOWN_NORM_THRESHOLD/UP_NORM_THRESHOLD (which
 // drive counting hysteresis and are a different, unrelated pair of cutoffs).
@@ -138,6 +147,13 @@ export default function CameraScreen() {
   // restarts via AsyncStorage.
   const [selectedStage, setSelectedStage] = useState<StageConfig | null>(null);
   const [clearedStages, setClearedStages] = useState<ReadonlySet<string>>(new Set());
+  // Adventure mode only: which exercise's stage chain is being browsed
+  // (null = showing the exercise-select screen). Each exercise has its own
+  // independent 1-1..1-5 progression — see adventure.ts.
+  const [adventureExercise, setAdventureExercise] = useState<ExerciseId | null>(null);
+  // Record mode only: the chosen countdown duration (null = showing the
+  // duration-select screen).
+  const [recordSeconds, setRecordSeconds] = useState<number | null>(null);
   const exerciseConfig = EXERCISES[exercise];
 
   useEffect(() => {
@@ -179,6 +195,7 @@ export default function CameraScreen() {
   const targetCountRef = useRef<number | null>(null);
   const selectedStageRef = useRef<StageConfig | null>(null);
   const clearedStagesRef = useRef<ReadonlySet<string>>(new Set());
+  const recordSecondsRef = useRef<number | null>(null);
 
   useEffect(() => {
     selectedStageRef.current = selectedStage;
@@ -186,6 +203,9 @@ export default function CameraScreen() {
   useEffect(() => {
     clearedStagesRef.current = clearedStages;
   }, [clearedStages]);
+  useEffect(() => {
+    recordSecondsRef.current = recordSeconds;
+  }, [recordSeconds]);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -208,12 +228,13 @@ export default function CameraScreen() {
         displacementCounterRef.current.seedReference(calibrationYRef.current);
       }
       if (modeRef.current === 'record') {
-        sessionTimeLimitRef.current = RECORD_MODE_SECONDS;
+        const limit = recordSecondsRef.current ?? RECORD_MODE_SECONDS;
+        sessionTimeLimitRef.current = limit;
         targetCountRef.current = null;
         sessionStartRef.current = Date.now();
         redZoneEnteredAtRef.current = null;
-        setTimeLeftSec(RECORD_MODE_SECONDS);
-        setTimeLimitSec(RECORD_MODE_SECONDS);
+        setTimeLeftSec(limit);
+        setTimeLimitSec(limit);
       } else if (modeRef.current === 'adventure' && selectedStageRef.current != null) {
         const limit = selectedStageRef.current.timeLimitSec;
         sessionTimeLimitRef.current = limit;
@@ -608,6 +629,29 @@ export default function CameraScreen() {
     setPhase('idle');
   };
 
+  // Android hardware/gesture back button otherwise exits the app straight
+  // from any screen — map it to the same "go back one level" the in-app
+  // back button (topBar, below) does: camera/tracking → stage select →
+  // exercise select → mode select → root (mode select), where returning
+  // false lets the system default (exit app) happen.
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (mode == null) return false;
+      handleStop();
+      if (mode === 'adventure' && selectedStage != null) {
+        setSelectedStage(null);
+      } else if (mode === 'adventure' && adventureExercise != null) {
+        setAdventureExercise(null);
+      } else if (mode === 'record' && recordSeconds != null) {
+        setRecordSeconds(null);
+      } else {
+        setMode(null);
+      }
+      return true;
+    });
+    return () => subscription.remove();
+  }, [mode, selectedStage, adventureExercise, recordSeconds]);
+
   if (mode == null) {
     return (
       <View style={styles.center}>
@@ -619,7 +663,7 @@ export default function CameraScreen() {
         <Pressable style={styles.modeButton} onPress={() => setMode('record')}>
           <Text style={styles.modeButtonTitle}>기록모드</Text>
           <Text style={styles.modeButtonDesc}>
-            60초 안에 최대한 많이 · 레드존에 2초 이상 있으면 탈락
+            정해진 시간 안에 최대한 많이 · 레드존에 2초 이상 있으면 탈락
           </Text>
         </Pressable>
         <Pressable style={styles.modeButton} onPress={() => setMode('adventure')}>
@@ -630,11 +674,45 @@ export default function CameraScreen() {
     );
   }
 
-  if (mode === 'adventure' && selectedStage == null) {
+  if (mode === 'record' && recordSeconds == null) {
     return (
       <View style={styles.center}>
-        <Text style={styles.modeSelectTitle}>1장</Text>
-        {ADVENTURE_STAGES.map((s) => {
+        <Text style={styles.modeSelectTitle}>기록모드</Text>
+        {RECORD_TIME_OPTIONS.map((seconds) => (
+          <Pressable key={seconds} style={styles.modeButton} onPress={() => setRecordSeconds(seconds)}>
+            <Text style={styles.modeButtonTitle}>{formatRecordDuration(seconds)}</Text>
+          </Pressable>
+        ))}
+        <Pressable style={styles.button} onPress={() => setMode(null)}>
+          <Text style={styles.buttonText}>모드 선택으로</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  if (mode === 'adventure' && adventureExercise == null) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.modeSelectTitle}>모험모드</Text>
+        {/* armCurlTest is a tuning aid, not a real workout — no adventure chain for it. */}
+        {(['pushup', 'squat', 'jumpingJack'] as ExerciseId[]).map((id) => (
+          <Pressable key={id} style={styles.modeButton} onPress={() => setAdventureExercise(id)}>
+            <Text style={styles.modeButtonTitle}>{EXERCISES[id].label}</Text>
+          </Pressable>
+        ))}
+        <Pressable style={styles.button} onPress={() => setMode(null)}>
+          <Text style={styles.buttonText}>모드 선택으로</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  if (mode === 'adventure' && selectedStage == null && adventureExercise != null) {
+    const stages = ADVENTURE_STAGES.filter((s) => s.exercise === adventureExercise);
+    return (
+      <View style={styles.center}>
+        <Text style={styles.modeSelectTitle}>{EXERCISES[adventureExercise].label} · 1장</Text>
+        {stages.map((s) => {
           const unlocked = isStageUnlocked(s, clearedStages);
           const isCleared = clearedStages.has(s.id);
           return (
@@ -656,8 +734,8 @@ export default function CameraScreen() {
             </Pressable>
           );
         })}
-        <Pressable style={styles.button} onPress={() => setMode(null)}>
-          <Text style={styles.buttonText}>모드 선택으로</Text>
+        <Pressable style={styles.button} onPress={() => setAdventureExercise(null)}>
+          <Text style={styles.buttonText}>운동 선택으로</Text>
         </Pressable>
       </View>
     );
@@ -707,8 +785,12 @@ export default function CameraScreen() {
           style={styles.backButton}
           onPress={() => {
             handleStop();
-            if (mode === 'adventure') {
+            if (mode === 'adventure' && selectedStage != null) {
               setSelectedStage(null);
+            } else if (mode === 'adventure' && adventureExercise != null) {
+              setAdventureExercise(null);
+            } else if (mode === 'record' && recordSeconds != null) {
+              setRecordSeconds(null);
             } else {
               setMode(null);
             }
@@ -758,10 +840,8 @@ export default function CameraScreen() {
         </Pressable>
 
         {mode === 'adventure' && selectedStage != null && (
-          <View style={styles.bossCard}>
-            <View style={styles.bossPortrait}>
-              <MonsterSprite stageId={selectedStage.id} size={104} hitSignal={count} />
-            </View>
+          <View style={styles.bossCard} pointerEvents="none">
+            <MonsterSprite stageId={selectedStage.id} size={180} hitSignal={count} />
             <Text style={styles.bossName}>
               {EXERCISES[exercise].label} {selectedStage.label}
             </Text>
@@ -1002,34 +1082,25 @@ const styles = StyleSheet.create({
   },
   bossCard: {
     position: 'absolute',
-    top: 20,
+    top: 12,
     alignSelf: 'center',
-    width: 280,
+    width: '86%',
     alignItems: 'center',
-    backgroundColor: 'rgba(11,11,15,0.7)',
-    borderRadius: 20,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    gap: 8,
-  },
-  bossPortrait: {
-    width: 116,
-    height: 116,
-    borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    alignItems: 'center',
-    justifyContent: 'center',
+    gap: 4,
   },
   bossName: {
     color: '#FFFFFF',
-    fontSize: 15,
+    fontSize: 17,
     fontWeight: '800',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
   },
   bossHpTrack: {
     width: '100%',
-    height: 18,
+    height: 28,
     borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.15)',
+    backgroundColor: 'rgba(255,255,255,0.25)',
     overflow: 'hidden',
     justifyContent: 'center',
   },
@@ -1043,9 +1114,12 @@ const styles = StyleSheet.create({
   },
   bossHpText: {
     color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '700',
+    fontSize: 14,
+    fontWeight: '800',
     textAlign: 'center',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
   resultTitle: {
     color: '#FFFFFF',

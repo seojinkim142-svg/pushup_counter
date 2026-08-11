@@ -11,74 +11,105 @@ export type StageConfig = {
   timeLimitSec: number;
 };
 
-// Chapter 1: a short introductory ramp across all three real exercises
-// (armCurlTest is a tuning aid, not a real workout, so it's excluded here).
-// Difficulty climbs gradually — later stages get both a higher target count
-// and less time per rep — ending on a pushup "boss" stage.
-export const ADVENTURE_STAGES: StageConfig[] = [
-  { id: '1-1', chapter: 1, stageNumber: 1, label: '1-1', exercise: 'squat', targetCount: 8, timeLimitSec: 30 },
-  { id: '1-2', chapter: 1, stageNumber: 2, label: '1-2', exercise: 'pushup', targetCount: 8, timeLimitSec: 30 },
-  {
-    id: '1-3',
-    chapter: 1,
-    stageNumber: 3,
-    label: '1-3',
-    exercise: 'jumpingJack',
-    targetCount: 15,
-    timeLimitSec: 25,
-  },
-  { id: '1-4', chapter: 1, stageNumber: 4, label: '1-4', exercise: 'squat', targetCount: 15, timeLimitSec: 40 },
-  { id: '1-5', chapter: 1, stageNumber: 5, label: '1-5', exercise: 'pushup', targetCount: 15, timeLimitSec: 40 },
-];
+type ChapterExercise = 'pushup' | 'squat' | 'jumpingJack';
+
+// Chapter 1: each of the three real exercises (armCurlTest is a tuning aid,
+// not a real workout, so it's excluded here) gets its own independent
+// 1-1..1-5 progression, chosen up front via CameraScreen's adventure
+// exercise-select screen — clearing pushup's stages doesn't unlock squat's,
+// and vice versa. Difficulty climbs within each exercise's own chain —
+// later stages get both a higher target count and less time per rep.
+const CHAPTER_1_PROGRESSION: Record<ChapterExercise, Array<{ targetCount: number; timeLimitSec: number }>> = {
+  pushup: [
+    { targetCount: 8, timeLimitSec: 30 },
+    { targetCount: 10, timeLimitSec: 30 },
+    { targetCount: 12, timeLimitSec: 32 },
+    { targetCount: 15, timeLimitSec: 34 },
+    { targetCount: 18, timeLimitSec: 36 },
+  ],
+  squat: [
+    { targetCount: 8, timeLimitSec: 30 },
+    { targetCount: 12, timeLimitSec: 30 },
+    { targetCount: 15, timeLimitSec: 32 },
+    { targetCount: 18, timeLimitSec: 34 },
+    { targetCount: 22, timeLimitSec: 36 },
+  ],
+  jumpingJack: [
+    { targetCount: 15, timeLimitSec: 25 },
+    { targetCount: 20, timeLimitSec: 26 },
+    { targetCount: 25, timeLimitSec: 27 },
+    { targetCount: 30, timeLimitSec: 28 },
+    { targetCount: 35, timeLimitSec: 30 },
+  ],
+};
+
+export const ADVENTURE_STAGES: StageConfig[] = (Object.keys(CHAPTER_1_PROGRESSION) as ChapterExercise[]).flatMap(
+  (exercise) =>
+    CHAPTER_1_PROGRESSION[exercise].map((cfg, i) => ({
+      id: `${exercise}-1-${i + 1}`,
+      chapter: 1,
+      stageNumber: i + 1,
+      label: `1-${i + 1}`,
+      exercise,
+      targetCount: cfg.targetCount,
+      timeLimitSec: cfg.timeLimitSec,
+    }))
+);
 
 export type MonsterClip = { frames: number[]; fps: number };
 
-// Per-stage monster animation frames, exported from Piskel and cropped to
-// individual PNGs (see scratchpad/extract_piskel.py — one-off, run by hand
-// when new art comes in). RN's bundler needs static require() calls, so this
-// can't be built from a file list at runtime; add an entry here each time a
-// stage gets art. `attacked` is optional — plays once (in place of `idle`)
-// each time a rep counts against that stage, then falls back to idle; a
-// stage with no `attacked` clip just never leaves its idle animation.
+// Chapter 1 uses the same slime for every stage across all three exercise
+// chains — only later chapters need distinct monster art per stage. RN's
+// bundler needs static require() calls, so the frame paths can't be built
+// from a variable at runtime.
 /* eslint-disable @typescript-eslint/no-require-imports */
-export const STAGE_MONSTER_ART: Partial<Record<string, { idle: MonsterClip; attacked?: MonsterClip }>> = {
-  '1-1': {
-    idle: {
-      frames: [
-        require('../../assets/images/adventure/stage-1-1/frame_0.png'),
-        require('../../assets/images/adventure/stage-1-1/frame_1.png'),
-        require('../../assets/images/adventure/stage-1-1/frame_2.png'),
-        require('../../assets/images/adventure/stage-1-1/frame_3.png'),
-        require('../../assets/images/adventure/stage-1-1/frame_4.png'),
-      ],
-      fps: 12,
-    },
-    attacked: {
-      frames: [
-        require('../../assets/images/adventure/stage-1-1-attacked/frame_0.png'),
-        require('../../assets/images/adventure/stage-1-1-attacked/frame_1.png'),
-        require('../../assets/images/adventure/stage-1-1-attacked/frame_2.png'),
-        require('../../assets/images/adventure/stage-1-1-attacked/frame_3.png'),
-        require('../../assets/images/adventure/stage-1-1-attacked/frame_4.png'),
-      ],
-      fps: 12,
-    },
+const CHAPTER_1_SLIME: { idle: MonsterClip; attacked: MonsterClip } = {
+  idle: {
+    frames: [
+      require('../../assets/images/adventure/stage-1-1/frame_0.png'),
+      require('../../assets/images/adventure/stage-1-1/frame_1.png'),
+      require('../../assets/images/adventure/stage-1-1/frame_2.png'),
+      require('../../assets/images/adventure/stage-1-1/frame_3.png'),
+      require('../../assets/images/adventure/stage-1-1/frame_4.png'),
+    ],
+    fps: 12,
+  },
+  attacked: {
+    frames: [
+      require('../../assets/images/adventure/stage-1-1-attacked/frame_0.png'),
+      require('../../assets/images/adventure/stage-1-1-attacked/frame_1.png'),
+      require('../../assets/images/adventure/stage-1-1-attacked/frame_2.png'),
+      require('../../assets/images/adventure/stage-1-1-attacked/frame_3.png'),
+      require('../../assets/images/adventure/stage-1-1-attacked/frame_4.png'),
+    ],
+    fps: 12,
   },
 };
 /* eslint-enable @typescript-eslint/no-require-imports */
 
-/** True if this stage is playable — the first stage, or the previous one has been cleared. */
+// Per-stage monster animation frames — `attacked` is optional — plays once
+// (in place of `idle`) each time a rep counts against that stage, then
+// falls back to idle; a stage with no `attacked` clip just never leaves its
+// idle animation. Every chapter-1 stage points at the same CHAPTER_1_SLIME
+// object (see comment above), so add distinct entries here once later
+// chapters get their own art.
+export const STAGE_MONSTER_ART: Partial<Record<string, { idle: MonsterClip; attacked?: MonsterClip }>> =
+  Object.fromEntries(ADVENTURE_STAGES.filter((s) => s.chapter === 1).map((s) => [s.id, CHAPTER_1_SLIME]));
+
+/** True if this stage is playable — the first stage in its exercise's chain, or the previous one in that chain has been cleared. */
 export function isStageUnlocked(stage: StageConfig, cleared: ReadonlySet<string>): boolean {
-  const index = ADVENTURE_STAGES.findIndex((s) => s.id === stage.id);
+  const chain = ADVENTURE_STAGES.filter((s) => s.exercise === stage.exercise);
+  const index = chain.findIndex((s) => s.id === stage.id);
   if (index <= 0) return true;
-  return cleared.has(ADVENTURE_STAGES[index - 1].id);
+  return cleared.has(chain[index - 1].id);
 }
 
-/** The next stage after this one, or null if it's the last one. */
+/** The next stage in this stage's exercise chain, or null if it's the last one. */
 export function nextStage(stage: StageConfig): StageConfig | null {
-  const index = ADVENTURE_STAGES.findIndex((s) => s.id === stage.id);
-  if (index === -1 || index + 1 >= ADVENTURE_STAGES.length) return null;
-  return ADVENTURE_STAGES[index + 1];
+  const chain = ADVENTURE_STAGES.filter((s) => s.exercise === stage.exercise);
+  const index = chain.findIndex((s) => s.id === stage.id);
+  if (index === -1 || index + 1 >= chain.length) return null;
+  return chain[index + 1];
 }
 
 const CLEARED_STAGES_KEY = '@push_up_counter/adventure_cleared_stages';
