@@ -729,9 +729,11 @@ export default function CameraScreen() {
           <Pressable style={styles.backButton} onPress={() => setAdventureExercise(null)}>
             <Text style={styles.backButtonText}>‹ 운동 선택</Text>
           </Pressable>
-          <Text style={styles.stageListTopBarTitle}>
-            {EXERCISES[adventureExercise].label} · {currentChapter}장
-          </Text>
+          <View style={styles.stageListTitleOverlay} pointerEvents="none">
+            <Text style={styles.stageListTopBarTitle}>
+              {EXERCISES[adventureExercise].label} · {currentChapter}장
+            </Text>
+          </View>
         </View>
         <ScrollView
           key={currentChapter}
@@ -763,16 +765,16 @@ export default function CameraScreen() {
           {chapters.length > 1 && (
             <View style={styles.chapterNavRow}>
               <Pressable
-                style={[styles.button, styles.chapterNavButton]}
+                style={styles.chapterNavButton}
                 onPress={() => setChapterPageIndex((i) => (i - 1 + chapters.length) % chapters.length)}
               >
-                <Text style={styles.buttonText}>이전장</Text>
+                <Text style={styles.chapterNavButtonText}>이전</Text>
               </Pressable>
               <Pressable
-                style={[styles.button, styles.chapterNavButton]}
+                style={styles.chapterNavButton}
                 onPress={() => setChapterPageIndex((i) => (i + 1) % chapters.length)}
               >
-                <Text style={styles.buttonText}>다음장</Text>
+                <Text style={styles.chapterNavButtonText}>다음</Text>
               </Pressable>
             </View>
           )}
@@ -1088,25 +1090,39 @@ const styles = StyleSheet.create({
   },
   stageListTopBar: {
     width: '100%',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
+    position: 'relative',
+    alignItems: 'flex-start',
     paddingTop: 16,
     paddingHorizontal: 24,
   },
+  stageListTitleOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   stageListTopBarTitle: {
-    flexShrink: 1,
     color: TEXT_PRIMARY,
     fontSize: 18,
     fontWeight: '800',
   },
   chapterNavRow: {
-    width: '100%',
     flexDirection: 'row',
     gap: 12,
   },
   chapterNavButton: {
-    flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 999,
+    backgroundColor: ACCENT,
+  },
+  chapterNavButtonText: {
+    color: TEXT_ON_ACCENT,
+    fontSize: 14,
+    fontWeight: '700',
   },
   stageListScroll: {
     flex: 1,
