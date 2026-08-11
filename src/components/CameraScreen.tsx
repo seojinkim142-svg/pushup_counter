@@ -156,9 +156,20 @@ export default function CameraScreen() {
   const [recordSeconds, setRecordSeconds] = useState<number | null>(null);
   const exerciseConfig = EXERCISES[exercise];
 
+  // Stage-list screen only: which chapter page is showing — only one
+  // chapter's stages render at a time, cycled through via "다음장".
+  const [chapterPageIndex, setChapterPageIndex] = useState(0);
+
   useEffect(() => {
     loadClearedStages().then(setClearedStages);
   }, []);
+
+  // Reset the chapter page whenever a different exercise's stage list is
+  // opened — otherwise a stale index could land past that exercise's own
+  // chapter count, or just resume mid-way instead of at chapter 1.
+  useEffect(() => {
+    setChapterPageIndex(0);
+  }, [adventureExercise]);
 
   // Read from refs inside the stable onResults callback so switching
   // exercise/pause doesn't force react-native-mediapipe to recreate the
@@ -710,42 +721,53 @@ export default function CameraScreen() {
   if (mode === 'adventure' && selectedStage == null && adventureExercise != null) {
     const stages = ADVENTURE_STAGES.filter((s) => s.exercise === adventureExercise);
     const chapters = Array.from(new Set(stages.map((s) => s.chapter))).sort((a, b) => a - b);
+    const currentChapter = chapters[chapterPageIndex % chapters.length];
+    const chapterStages = stages.filter((s) => s.chapter === currentChapter);
     return (
       <View style={[styles.center, { padding: 0 }]}>
-        <ScrollView style={styles.stageListScroll} contentContainerStyle={styles.stageListContent}>
-          <Text style={styles.modeSelectTitle}>{EXERCISES[adventureExercise].label}</Text>
-          {chapters.map((chapter) => (
-            <React.Fragment key={chapter}>
-              <Text style={styles.chapterHeading}>{chapter}장</Text>
-              {stages
-                .filter((s) => s.chapter === chapter)
-                .map((s) => {
-                  const unlocked = isStageUnlocked(s, clearedStages);
-                  const isCleared = clearedStages.has(s.id);
-                  return (
-                    <Pressable
-                      key={s.id}
-                      style={[styles.modeButton, styles.stageButtonRow, !unlocked && styles.modeButtonLocked]}
-                      disabled={!unlocked}
-                      onPress={() => handleSelectStage(s)}
-                    >
-                      <MonsterSprite stageId={s.id} size={48} />
-                      <View style={styles.stageButtonText}>
-                        <Text style={styles.modeButtonTitle}>
-                          {s.label} {isCleared ? '✓' : !unlocked ? '🔒' : ''}
-                        </Text>
-                        <Text style={styles.modeButtonDesc}>
-                          {EXERCISES[s.exercise].label} {s.targetCount}회 · {s.timeLimitSec}초 안에
-                        </Text>
-                      </View>
-                    </Pressable>
-                  );
-                })}
-            </React.Fragment>
-          ))}
-          <Pressable style={styles.button} onPress={() => setAdventureExercise(null)}>
-            <Text style={styles.buttonText}>운동 선택으로</Text>
+        <View style={styles.stageListTopBar}>
+          <Pressable style={styles.backButton} onPress={() => setAdventureExercise(null)}>
+            <Text style={styles.backButtonText}>‹ 운동 선택</Text>
           </Pressable>
+        </View>
+        <ScrollView
+          key={currentChapter}
+          style={styles.stageListScroll}
+          contentContainerStyle={styles.stageListContent}
+        >
+          <Text style={styles.modeSelectTitle}>
+            {EXERCISES[adventureExercise].label} · {currentChapter}장
+          </Text>
+          {chapterStages.map((s) => {
+            const unlocked = isStageUnlocked(s, clearedStages);
+            const isCleared = clearedStages.has(s.id);
+            return (
+              <Pressable
+                key={s.id}
+                style={[styles.modeButton, styles.stageButtonRow, !unlocked && styles.modeButtonLocked]}
+                disabled={!unlocked}
+                onPress={() => handleSelectStage(s)}
+              >
+                <MonsterSprite stageId={s.id} size={48} />
+                <View style={styles.stageButtonText}>
+                  <Text style={styles.modeButtonTitle}>
+                    {s.label} {isCleared ? '✓' : !unlocked ? '🔒' : ''}
+                  </Text>
+                  <Text style={styles.modeButtonDesc}>
+                    {EXERCISES[s.exercise].label} {s.targetCount}회 · {s.timeLimitSec}초 안에
+                  </Text>
+                </View>
+              </Pressable>
+            );
+          })}
+          {chapters.length > 1 && (
+            <Pressable
+              style={styles.button}
+              onPress={() => setChapterPageIndex((i) => (i + 1) % chapters.length)}
+            >
+              <Text style={styles.buttonText}>다음장</Text>
+            </Pressable>
+          )}
         </ScrollView>
       </View>
     );
@@ -1056,6 +1078,12 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 6,
   },
+  stageListTopBar: {
+    width: '100%',
+    alignItems: 'flex-start',
+    paddingTop: 16,
+    paddingHorizontal: 24,
+  },
   stageListScroll: {
     flex: 1,
     width: '100%',
@@ -1064,12 +1092,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 16,
     paddingVertical: 24,
-  },
-  chapterHeading: {
-    color: TEXT_MUTED,
-    fontSize: 14,
-    fontWeight: '800',
-    alignSelf: 'flex-start',
+    paddingHorizontal: 24,
   },
   stageInfoText: {
     color: TEXT_MUTED,
