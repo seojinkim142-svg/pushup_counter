@@ -1092,8 +1092,12 @@ const styles = StyleSheet.create({
     width: '100%',
     position: 'relative',
     alignItems: 'flex-start',
-    paddingTop: 16,
+    paddingTop: 24,
+    paddingBottom: 16,
     paddingHorizontal: 24,
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#DBEAFE',
   },
   stageListTitleOverlay: {
     position: 'absolute',
