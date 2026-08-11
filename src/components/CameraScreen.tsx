@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { BackHandler, Dimensions, Pressable, StyleSheet, Text, View } from 'react-native';
+import { BackHandler, Dimensions, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useCameraPermission, type CameraPosition } from 'react-native-vision-camera';
 import {
   Delegate,
@@ -709,34 +709,44 @@ export default function CameraScreen() {
 
   if (mode === 'adventure' && selectedStage == null && adventureExercise != null) {
     const stages = ADVENTURE_STAGES.filter((s) => s.exercise === adventureExercise);
+    const chapters = Array.from(new Set(stages.map((s) => s.chapter))).sort((a, b) => a - b);
     return (
-      <View style={styles.center}>
-        <Text style={styles.modeSelectTitle}>{EXERCISES[adventureExercise].label} · 1장</Text>
-        {stages.map((s) => {
-          const unlocked = isStageUnlocked(s, clearedStages);
-          const isCleared = clearedStages.has(s.id);
-          return (
-            <Pressable
-              key={s.id}
-              style={[styles.modeButton, styles.stageButtonRow, !unlocked && styles.modeButtonLocked]}
-              disabled={!unlocked}
-              onPress={() => handleSelectStage(s)}
-            >
-              <MonsterSprite stageId={s.id} size={48} />
-              <View style={styles.stageButtonText}>
-                <Text style={styles.modeButtonTitle}>
-                  {s.label} {isCleared ? '✓' : !unlocked ? '🔒' : ''}
-                </Text>
-                <Text style={styles.modeButtonDesc}>
-                  {EXERCISES[s.exercise].label} {s.targetCount}회 · {s.timeLimitSec}초 안에
-                </Text>
-              </View>
-            </Pressable>
-          );
-        })}
-        <Pressable style={styles.button} onPress={() => setAdventureExercise(null)}>
-          <Text style={styles.buttonText}>운동 선택으로</Text>
-        </Pressable>
+      <View style={[styles.center, { padding: 0 }]}>
+        <ScrollView style={styles.stageListScroll} contentContainerStyle={styles.stageListContent}>
+          <Text style={styles.modeSelectTitle}>{EXERCISES[adventureExercise].label}</Text>
+          {chapters.map((chapter) => (
+            <React.Fragment key={chapter}>
+              <Text style={styles.chapterHeading}>{chapter}장</Text>
+              {stages
+                .filter((s) => s.chapter === chapter)
+                .map((s) => {
+                  const unlocked = isStageUnlocked(s, clearedStages);
+                  const isCleared = clearedStages.has(s.id);
+                  return (
+                    <Pressable
+                      key={s.id}
+                      style={[styles.modeButton, styles.stageButtonRow, !unlocked && styles.modeButtonLocked]}
+                      disabled={!unlocked}
+                      onPress={() => handleSelectStage(s)}
+                    >
+                      <MonsterSprite stageId={s.id} size={48} />
+                      <View style={styles.stageButtonText}>
+                        <Text style={styles.modeButtonTitle}>
+                          {s.label} {isCleared ? '✓' : !unlocked ? '🔒' : ''}
+                        </Text>
+                        <Text style={styles.modeButtonDesc}>
+                          {EXERCISES[s.exercise].label} {s.targetCount}회 · {s.timeLimitSec}초 안에
+                        </Text>
+                      </View>
+                    </Pressable>
+                  );
+                })}
+            </React.Fragment>
+          ))}
+          <Pressable style={styles.button} onPress={() => setAdventureExercise(null)}>
+            <Text style={styles.buttonText}>운동 선택으로</Text>
+          </Pressable>
+        </ScrollView>
       </View>
     );
   }
@@ -1045,6 +1055,21 @@ const styles = StyleSheet.create({
   stageButtonText: {
     flex: 1,
     gap: 6,
+  },
+  stageListScroll: {
+    flex: 1,
+    width: '100%',
+  },
+  stageListContent: {
+    alignItems: 'center',
+    gap: 16,
+    paddingVertical: 24,
+  },
+  chapterHeading: {
+    color: TEXT_MUTED,
+    fontSize: 14,
+    fontWeight: '800',
+    alignSelf: 'flex-start',
   },
   stageInfoText: {
     color: TEXT_MUTED,

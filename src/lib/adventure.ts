@@ -12,56 +12,88 @@ export type StageConfig = {
 };
 
 type ChapterExercise = 'pushup' | 'squat' | 'jumpingJack';
+type StageDifficulty = { targetCount: number; timeLimitSec: number };
 
-// Chapter 1: each of the three real exercises (armCurlTest is a tuning aid,
-// not a real workout, so it's excluded here) gets its own independent
-// 1-1..1-5 progression, chosen up front via CameraScreen's adventure
-// exercise-select screen — clearing pushup's stages doesn't unlock squat's,
-// and vice versa. Difficulty climbs within each exercise's own chain —
-// later stages get both a higher target count and less time per rep.
-const CHAPTER_1_PROGRESSION: Record<ChapterExercise, Array<{ targetCount: number; timeLimitSec: number }>> = {
-  pushup: [
-    { targetCount: 8, timeLimitSec: 30 },
-    { targetCount: 10, timeLimitSec: 30 },
-    { targetCount: 12, timeLimitSec: 32 },
-    { targetCount: 15, timeLimitSec: 34 },
-    { targetCount: 18, timeLimitSec: 36 },
-  ],
-  squat: [
-    { targetCount: 8, timeLimitSec: 30 },
-    { targetCount: 12, timeLimitSec: 30 },
-    { targetCount: 15, timeLimitSec: 32 },
-    { targetCount: 18, timeLimitSec: 34 },
-    { targetCount: 22, timeLimitSec: 36 },
-  ],
-  jumpingJack: [
-    { targetCount: 15, timeLimitSec: 25 },
-    { targetCount: 20, timeLimitSec: 26 },
-    { targetCount: 25, timeLimitSec: 27 },
-    { targetCount: 30, timeLimitSec: 28 },
-    { targetCount: 35, timeLimitSec: 30 },
-  ],
-};
+// Each of the three real exercises (armCurlTest is a tuning aid, not a real
+// workout, so it's excluded here) gets its own independent stage chain,
+// chosen up front via CameraScreen's adventure exercise-select screen —
+// clearing pushup's stages doesn't unlock squat's, and vice versa. Within an
+// exercise's chain, chapters run back to back (chapter 2's 2-1 unlocks once
+// chapter 1's 1-5 is cleared — see isStageUnlocked). Difficulty climbs both
+// within a chapter and from one chapter to the next — later stages get both
+// a higher target count and less time per rep.
+const CHAPTER_PROGRESSIONS: Record<ChapterExercise, StageDifficulty[]>[] = [
+  {
+    // Chapter 1
+    pushup: [
+      { targetCount: 8, timeLimitSec: 30 },
+      { targetCount: 10, timeLimitSec: 30 },
+      { targetCount: 12, timeLimitSec: 32 },
+      { targetCount: 15, timeLimitSec: 34 },
+      { targetCount: 18, timeLimitSec: 36 },
+    ],
+    squat: [
+      { targetCount: 8, timeLimitSec: 30 },
+      { targetCount: 12, timeLimitSec: 30 },
+      { targetCount: 15, timeLimitSec: 32 },
+      { targetCount: 18, timeLimitSec: 34 },
+      { targetCount: 22, timeLimitSec: 36 },
+    ],
+    jumpingJack: [
+      { targetCount: 15, timeLimitSec: 25 },
+      { targetCount: 20, timeLimitSec: 26 },
+      { targetCount: 25, timeLimitSec: 27 },
+      { targetCount: 30, timeLimitSec: 28 },
+      { targetCount: 35, timeLimitSec: 30 },
+    ],
+  },
+  {
+    // Chapter 2
+    pushup: [
+      { targetCount: 20, timeLimitSec: 36 },
+      { targetCount: 22, timeLimitSec: 36 },
+      { targetCount: 25, timeLimitSec: 38 },
+      { targetCount: 28, timeLimitSec: 38 },
+      { targetCount: 32, timeLimitSec: 40 },
+    ],
+    squat: [
+      { targetCount: 25, timeLimitSec: 36 },
+      { targetCount: 28, timeLimitSec: 36 },
+      { targetCount: 32, timeLimitSec: 38 },
+      { targetCount: 36, timeLimitSec: 38 },
+      { targetCount: 40, timeLimitSec: 40 },
+    ],
+    jumpingJack: [
+      { targetCount: 40, timeLimitSec: 30 },
+      { targetCount: 45, timeLimitSec: 31 },
+      { targetCount: 50, timeLimitSec: 32 },
+      { targetCount: 55, timeLimitSec: 33 },
+      { targetCount: 60, timeLimitSec: 35 },
+    ],
+  },
+];
 
-export const ADVENTURE_STAGES: StageConfig[] = (Object.keys(CHAPTER_1_PROGRESSION) as ChapterExercise[]).flatMap(
+export const ADVENTURE_STAGES: StageConfig[] = (Object.keys(CHAPTER_PROGRESSIONS[0]) as ChapterExercise[]).flatMap(
   (exercise) =>
-    CHAPTER_1_PROGRESSION[exercise].map((cfg, i) => ({
-      id: `${exercise}-1-${i + 1}`,
-      chapter: 1,
-      stageNumber: i + 1,
-      label: `1-${i + 1}`,
-      exercise,
-      targetCount: cfg.targetCount,
-      timeLimitSec: cfg.timeLimitSec,
-    }))
+    CHAPTER_PROGRESSIONS.flatMap((chapterProgression, chapterIndex) =>
+      chapterProgression[exercise].map((cfg, i) => ({
+        id: `${exercise}-${chapterIndex + 1}-${i + 1}`,
+        chapter: chapterIndex + 1,
+        stageNumber: i + 1,
+        label: `${chapterIndex + 1}-${i + 1}`,
+        exercise,
+        targetCount: cfg.targetCount,
+        timeLimitSec: cfg.timeLimitSec,
+      }))
+    )
 );
 
 export type MonsterClip = { frames: number[]; fps: number };
 
-// Chapter 1 uses the same slime for every stage across all three exercise
-// chains — only later chapters need distinct monster art per stage. RN's
-// bundler needs static require() calls, so the frame paths can't be built
-// from a variable at runtime.
+// Every stage in a chapter shares the same monster art across all three
+// exercise chains — only the exact per-stage difficulty differs, not the
+// monster. RN's bundler needs static require() calls, so the frame paths
+// can't be built from a variable at runtime.
 /* eslint-disable @typescript-eslint/no-require-imports */
 const CHAPTER_1_SLIME: { idle: MonsterClip; attacked: MonsterClip } = {
   idle: {
@@ -85,16 +117,35 @@ const CHAPTER_1_SLIME: { idle: MonsterClip; attacked: MonsterClip } = {
     fps: 12,
   },
 };
+// No attacked clip yet for the chapter-2 goblin — MonsterSprite already
+// falls back to idle-only when `attacked` is omitted, and the red hit-flash
+// (see MonsterSprite.tsx) covers the "you got hit" feedback either way.
+const CHAPTER_2_GOBLIN: { idle: MonsterClip } = {
+  idle: {
+    frames: [
+      require('../../assets/images/adventure/stage-2-1/frame_0.png'),
+      require('../../assets/images/adventure/stage-2-1/frame_1.png'),
+      require('../../assets/images/adventure/stage-2-1/frame_2.png'),
+      require('../../assets/images/adventure/stage-2-1/frame_3.png'),
+      require('../../assets/images/adventure/stage-2-1/frame_4.png'),
+    ],
+    fps: 12,
+  },
+};
 /* eslint-enable @typescript-eslint/no-require-imports */
+
+const CHAPTER_MONSTER_ART: Record<number, { idle: MonsterClip; attacked?: MonsterClip }> = {
+  1: CHAPTER_1_SLIME,
+  2: CHAPTER_2_GOBLIN,
+};
 
 // Per-stage monster animation frames — `attacked` is optional — plays once
 // (in place of `idle`) each time a rep counts against that stage, then
 // falls back to idle; a stage with no `attacked` clip just never leaves its
-// idle animation. Every chapter-1 stage points at the same CHAPTER_1_SLIME
-// object (see comment above), so add distinct entries here once later
-// chapters get their own art.
+// idle animation. Every stage points at its chapter's shared art (see
+// CHAPTER_MONSTER_ART above).
 export const STAGE_MONSTER_ART: Partial<Record<string, { idle: MonsterClip; attacked?: MonsterClip }>> =
-  Object.fromEntries(ADVENTURE_STAGES.filter((s) => s.chapter === 1).map((s) => [s.id, CHAPTER_1_SLIME]));
+  Object.fromEntries(ADVENTURE_STAGES.map((s) => [s.id, CHAPTER_MONSTER_ART[s.chapter]]));
 
 /** True if this stage is playable — the first stage in its exercise's chain, or the previous one in that chain has been cleared. */
 export function isStageUnlocked(stage: StageConfig, cleared: ReadonlySet<string>): boolean {

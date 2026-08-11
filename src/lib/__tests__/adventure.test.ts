@@ -1,7 +1,7 @@
 import { ADVENTURE_STAGES, isStageUnlocked, nextStage } from '../adventure';
 
 describe('ADVENTURE_STAGES', () => {
-  it('has unique ids, with each exercise labeled 1-1..1-5', () => {
+  it('has unique ids, with each exercise labeled 1-1..1-5 then 2-1..2-5', () => {
     const ids = ADVENTURE_STAGES.map((s) => s.id);
     expect(new Set(ids).size).toBe(ids.length);
 
@@ -11,7 +11,7 @@ describe('ADVENTURE_STAGES', () => {
     }
     expect(labelsByExercise.size).toBe(3);
     for (const labels of labelsByExercise.values()) {
-      expect(labels).toEqual(['1-1', '1-2', '1-3', '1-4', '1-5']);
+      expect(labels).toEqual(['1-1', '1-2', '1-3', '1-4', '1-5', '2-1', '2-2', '2-3', '2-4', '2-5']);
     }
   });
 });
@@ -36,6 +36,15 @@ describe('isStageUnlocked', () => {
     const squatFirst = ADVENTURE_STAGES.find((s) => s.exercise === 'squat');
     expect(squatFirst).toBeDefined();
     expect(isStageUnlocked(pushupStages[1], new Set([squatFirst!.id]))).toBe(false);
+  });
+
+  it('chapter 2 stage 1 stays locked until chapter 1 stage 5 (same chain) is cleared', () => {
+    const chapter1Last = pushupStages.find((s) => s.chapter === 1 && s.stageNumber === 5);
+    const chapter2First = pushupStages.find((s) => s.chapter === 2 && s.stageNumber === 1);
+    expect(chapter1Last).toBeDefined();
+    expect(chapter2First).toBeDefined();
+    expect(isStageUnlocked(chapter2First!, new Set())).toBe(false);
+    expect(isStageUnlocked(chapter2First!, new Set([chapter1Last!.id]))).toBe(true);
   });
 });
 
