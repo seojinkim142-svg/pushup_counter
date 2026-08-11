@@ -17,11 +17,13 @@ type StageDifficulty = { targetCount: number; timeLimitSec: number };
 // Each of the three real exercises (armCurlTest is a tuning aid, not a real
 // workout, so it's excluded here) gets its own independent stage chain,
 // chosen up front via CameraScreen's adventure exercise-select screen —
-// clearing pushup's stages doesn't unlock squat's, and vice versa. Within an
-// exercise's chain, chapters run back to back (chapter 2's 2-1 unlocks once
-// chapter 1's 1-5 is cleared — see isStageUnlocked). Difficulty climbs both
-// within a chapter and from one chapter to the next — later stages get both
-// a higher target count and less time per rep.
+// clearing pushup's stages doesn't unlock squat's, and vice versa. Every
+// chapter's first stage (N-1) is unlocked from the start — chapters are
+// browsed via 다음장/이전장 rather than earned by clearing the previous
+// chapter — but within a chapter, stages 2-5 still require the previous one
+// in that same chapter to be cleared (see isStageUnlocked). Difficulty
+// climbs both within a chapter and from one chapter to the next — later
+// stages get both a higher target count and less time per rep.
 const CHAPTER_PROGRESSIONS: Record<ChapterExercise, StageDifficulty[]>[] = [
   {
     // Chapter 1
@@ -147,9 +149,16 @@ const CHAPTER_MONSTER_ART: Record<number, { idle: MonsterClip; attacked?: Monste
 export const STAGE_MONSTER_ART: Partial<Record<string, { idle: MonsterClip; attacked?: MonsterClip }>> =
   Object.fromEntries(ADVENTURE_STAGES.map((s) => [s.id, CHAPTER_MONSTER_ART[s.chapter]]));
 
-/** True if this stage is playable — the first stage in its exercise's chain, or the previous one in that chain has been cleared. */
+/**
+ * True if this stage is playable — every chapter's first stage (N-1) is
+ * always open, so a chapter is reachable via 다음장/이전장 without first
+ * clearing every earlier chapter; stages after that still require the
+ * previous one in the same chapter (same exercise, same chapter) to be
+ * cleared.
+ */
 export function isStageUnlocked(stage: StageConfig, cleared: ReadonlySet<string>): boolean {
-  const chain = ADVENTURE_STAGES.filter((s) => s.exercise === stage.exercise);
+  if (stage.stageNumber === 1) return true;
+  const chain = ADVENTURE_STAGES.filter((s) => s.exercise === stage.exercise && s.chapter === stage.chapter);
   const index = chain.findIndex((s) => s.id === stage.id);
   if (index <= 0) return true;
   return cleared.has(chain[index - 1].id);

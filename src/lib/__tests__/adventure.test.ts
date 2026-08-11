@@ -38,13 +38,27 @@ describe('isStageUnlocked', () => {
     expect(isStageUnlocked(pushupStages[1], new Set([squatFirst!.id]))).toBe(false);
   });
 
-  it('chapter 2 stage 1 stays locked until chapter 1 stage 5 (same chain) is cleared', () => {
-    const chapter1Last = pushupStages.find((s) => s.chapter === 1 && s.stageNumber === 5);
+  it('every chapter\'s first stage (N-1) is unlocked from the start, regardless of earlier chapters', () => {
     const chapter2First = pushupStages.find((s) => s.chapter === 2 && s.stageNumber === 1);
-    expect(chapter1Last).toBeDefined();
     expect(chapter2First).toBeDefined();
-    expect(isStageUnlocked(chapter2First!, new Set())).toBe(false);
-    expect(isStageUnlocked(chapter2First!, new Set([chapter1Last!.id]))).toBe(true);
+    expect(isStageUnlocked(chapter2First!, new Set())).toBe(true);
+  });
+
+  it('chapter 2 stage 2 still requires chapter 2 stage 1 (same chapter) to be cleared', () => {
+    const chapter2First = pushupStages.find((s) => s.chapter === 2 && s.stageNumber === 1);
+    const chapter2Second = pushupStages.find((s) => s.chapter === 2 && s.stageNumber === 2);
+    expect(chapter2First).toBeDefined();
+    expect(chapter2Second).toBeDefined();
+    expect(isStageUnlocked(chapter2Second!, new Set())).toBe(false);
+    expect(isStageUnlocked(chapter2Second!, new Set([chapter2First!.id]))).toBe(true);
+  });
+
+  it('clearing chapter 1 stages does not unlock chapter 2 stage 2 by itself', () => {
+    const chapter1Last = pushupStages.find((s) => s.chapter === 1 && s.stageNumber === 5);
+    const chapter2Second = pushupStages.find((s) => s.chapter === 2 && s.stageNumber === 2);
+    expect(chapter1Last).toBeDefined();
+    expect(chapter2Second).toBeDefined();
+    expect(isStageUnlocked(chapter2Second!, new Set([chapter1Last!.id]))).toBe(false);
   });
 });
 
