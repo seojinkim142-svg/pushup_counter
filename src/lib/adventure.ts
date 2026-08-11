@@ -40,40 +40,32 @@ export type MonsterClip = { frames: number[]; fps: number };
 // stage gets art. `attacked` is optional — plays once (in place of `idle`)
 // each time a rep counts against that stage, then falls back to idle; a
 // stage with no `attacked` clip just never leaves its idle animation.
+/* eslint-disable @typescript-eslint/no-require-imports */
 export const STAGE_MONSTER_ART: Partial<Record<string, { idle: MonsterClip; attacked?: MonsterClip }>> = {
   '1-1': {
     idle: {
       frames: [
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
         require('../../assets/images/adventure/stage-1-1/frame_0.png'),
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
         require('../../assets/images/adventure/stage-1-1/frame_1.png'),
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
         require('../../assets/images/adventure/stage-1-1/frame_2.png'),
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
         require('../../assets/images/adventure/stage-1-1/frame_3.png'),
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
         require('../../assets/images/adventure/stage-1-1/frame_4.png'),
       ],
       fps: 12,
     },
     attacked: {
       frames: [
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
         require('../../assets/images/adventure/stage-1-1-attacked/frame_0.png'),
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
         require('../../assets/images/adventure/stage-1-1-attacked/frame_1.png'),
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
         require('../../assets/images/adventure/stage-1-1-attacked/frame_2.png'),
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
         require('../../assets/images/adventure/stage-1-1-attacked/frame_3.png'),
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
         require('../../assets/images/adventure/stage-1-1-attacked/frame_4.png'),
       ],
       fps: 12,
     },
   },
 };
+/* eslint-enable @typescript-eslint/no-require-imports */
 
 /** True if this stage is playable — the first stage, or the previous one has been cleared. */
 export function isStageUnlocked(stage: StageConfig, cleared: ReadonlySet<string>): boolean {

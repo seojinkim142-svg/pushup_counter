@@ -1,5 +1,5 @@
-import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
-import { Dimensions, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Dimensions, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useCameraPermission, type CameraPosition } from 'react-native-vision-camera';
 import {
   Delegate,
@@ -10,12 +10,9 @@ import {
   type PoseDetectionResultBundle,
   type ViewCoordinator,
 } from 'react-native-mediapipe';
-import Svg, { Path } from 'react-native-svg';
 import {
   AngleRepCounter,
   EXERCISES,
-  MIN_KEYPOINT_SCORE,
-  SKELETON_EDGES,
   SideAngleRepCounter,
   VISIBLE_LANDMARK_INDICES,
   VerticalRepCounter,
@@ -26,13 +23,17 @@ import {
 } from '../lib/pose';
 import {
   ADVENTURE_STAGES,
-  STAGE_MONSTER_ART,
   isStageUnlocked,
   loadClearedStages,
   nextStage,
   saveClearedStage,
   type StageConfig,
 } from '../lib/adventure';
+import SkeletonOverlay, { type SkeletonOverlayHandle } from './SkeletonOverlay';
+import ProgressGauge, { type ProgressGaugeHandle } from './ProgressGauge';
+import CountdownClock from './CountdownClock';
+import MonsterSprite from './MonsterSprite';
+import { ACCENT, ACCENT_ON_DARK, TEXT_MUTED, TEXT_ON_ACCENT, TEXT_PRIMARY } from './theme';
 
 // "full" trades some speed for noticeably better landmark accuracy than
 // "lite" — worth it now that GPU delegate + the render fixes give enough
@@ -44,12 +45,7 @@ const VISIBLE_LANDMARK_SET = new Set(VISIBLE_LANDMARK_INDICES);
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const PREVIEW_SIZE = SCREEN_WIDTH;
 
-const GAUGE_WIDTH = 34;
-const GAUGE_HEIGHT = 220;
-const GAUGE_DOT_SIZE = 30;
-
 type Stage = 'up' | 'down';
-type ScreenPoint = { x: number; y: number; score: number };
 
 // 'idle': not tracking. 'calibrating': counting down while the user gets
 // into the starting position — no posture/counting logic runs yet, only the
@@ -116,241 +112,11 @@ function isTimedMode(mode: Mode | null): boolean {
 // real workout mode — remove this tab once pushup/squat tuning is done.
 const EXERCISE_ORDER: ExerciseId[] = ['pushup', 'squat', 'jumpingJack', 'armCurlTest'];
 
-const JOINT_RADIUS = 4;
-
-/**
- * Builds one SVG path string for the whole skeleton (all edges as separate
- * M/L subpaths) instead of one <Line> element per edge. On this device,
- * committing ~24 individual react-native-svg host elements every update was
- * itself the render bottleneck (confirmed by measuring rAF throughput with
- * the skeleton removed: steady 60fps vs. ~10fps with it) — a single <Path>
- * element is one native view no matter how many segments its `d` describes.
- */
-function buildSkeletonEdgesPath(points: ScreenPoint[]): string {
-  let d = '';
-  for (const [a, b] of SKELETON_EDGES) {
-    const pa = points[a];
-    const pb = points[b];
-    if (!pa || !pb) continue;
-    if (pa.score < MIN_KEYPOINT_SCORE || pb.score < MIN_KEYPOINT_SCORE) continue;
-    d += `M${pa.x},${pa.y}L${pb.x},${pb.y}`;
-  }
-  return d;
-}
-
-/** Same idea as buildSkeletonEdgesPath, but for the joint dots (each a two-arc circle subpath). */
-function buildSkeletonJointsPath(points: ScreenPoint[], r: number): string {
-  let d = '';
-  for (const p of points) {
-    if (p.score <= MIN_KEYPOINT_SCORE) continue;
-    d += `M${p.x - r},${p.y}a${r},${r} 0 1,0 ${2 * r},0a${r},${r} 0 1,0 ${-2 * r},0`;
-  }
-  return d;
-}
-
 /** Exercises with a small-amplitude verticalDisplacement signal need a smaller calibration-range floor than the default. */
 function createDisplacementCounter(id: ExerciseId): VerticalRepCounter {
   const config = EXERCISES[id];
   const minCalibrationRange = config.signal === 'verticalDisplacement' ? config.minCalibrationRange : undefined;
   return new VerticalRepCounter(undefined, undefined, undefined, minCalibrationRange);
-}
-
-export type SkeletonOverlayHandle = { setTargetPoints: (points: ScreenPoint[]) => void };
-
-/**
- * Isolates the highest-churn state (interpolated skeleton points, up to
- * display refresh rate) in its own leaf component. Parent (CameraScreen)
- * feeds new detections in imperatively via the ref instead of prop/state,
- * so this component's frequent re-renders never touch the tabs, buttons,
- * counter, or gauge — only these two <Path> elements re-render.
- */
-const SkeletonOverlay = forwardRef<SkeletonOverlayHandle, { width: number; height: number }>(
-  function SkeletonOverlay({ width, height }, ref) {
-    const [points, setPoints] = useState<ScreenPoint[]>([]);
-    const prevRef = useRef<ScreenPoint[]>([]);
-    const prevTimestampRef = useRef(Date.now());
-    const targetRef = useRef<ScreenPoint[]>([]);
-    const targetTimestampRef = useRef(Date.now());
-    const settledRef = useRef(true);
-
-    useImperativeHandle(
-      ref,
-      () => ({
-        setTargetPoints(newPoints: ScreenPoint[]) {
-          prevRef.current = targetRef.current;
-          prevTimestampRef.current = targetTimestampRef.current;
-          targetRef.current = newPoints;
-          targetTimestampRef.current = Date.now();
-          settledRef.current = false;
-        },
-      }),
-      []
-    );
-
-    // Renders at display refresh rate by interpolating between the last two
-    // detection results over the interval actually observed between them,
-    // instead of holding each result's position until the next one arrives.
-    useEffect(() => {
-      let frameId: number;
-
-      const tick = () => {
-        frameId = requestAnimationFrame(tick);
-        if (settledRef.current) return;
-
-        const prev = prevRef.current;
-        const target = targetRef.current;
-        if (prev.length !== target.length) {
-          // Person just appeared/disappeared — nothing to interpolate from.
-          setPoints(target);
-          settledRef.current = true;
-          return;
-        }
-
-        const duration = Math.max(1, targetTimestampRef.current - prevTimestampRef.current);
-        const t = Math.min(1, (Date.now() - targetTimestampRef.current) / duration);
-        setPoints(
-          target.map((p, i) => {
-            const from = prev[i];
-            return { x: from.x + (p.x - from.x) * t, y: from.y + (p.y - from.y) * t, score: p.score };
-          })
-        );
-        if (t >= 1) settledRef.current = true;
-      };
-
-      frameId = requestAnimationFrame(tick);
-      return () => cancelAnimationFrame(frameId);
-    }, []);
-
-    return (
-      <Svg width={width} height={height} style={StyleSheet.absoluteFill}>
-        <Path d={buildSkeletonEdgesPath(points)} stroke="#39FF88" strokeWidth={2.5} fill="none" />
-        <Path d={buildSkeletonJointsPath(points, JOINT_RADIUS)} fill="#39FF88" />
-      </Svg>
-    );
-  }
-);
-
-export type ProgressGaugeHandle = { setTargetProgress: (progress: number | null) => void };
-
-/**
- * Same isolation/interpolation trick as SkeletonOverlay, applied to the
- * depth gauge dot: detection results arrive at ~10fps, so snapping the dot
- * straight to each new progress value makes it visibly hop between
- * positions — most noticeably right around a counted rep, where progress,
- * stage, and count all change in the same detection frame. Tweening between
- * the last two values over the interval actually observed between them
- * smooths that out, and doing it in its own leaf component (fed via ref,
- * not CameraScreen state) keeps those up-to-60fps re-renders from touching
- * the tabs/counter/buttons the way the skeleton overlay's did before.
- */
-// eslint-disable-next-line @typescript-eslint/ban-types
-const ProgressGauge = forwardRef<ProgressGaugeHandle, {}>(function ProgressGauge(_props, ref) {
-  const [progress, setProgress] = useState<number | null>(null);
-  const prevRef = useRef<number | null>(null);
-  const prevTimestampRef = useRef(Date.now());
-  const targetRef = useRef<number | null>(null);
-  const targetTimestampRef = useRef(Date.now());
-  const settledRef = useRef(true);
-
-  useImperativeHandle(
-    ref,
-    () => ({
-      setTargetProgress(newProgress: number | null) {
-        prevRef.current = targetRef.current;
-        prevTimestampRef.current = targetTimestampRef.current;
-        targetRef.current = newProgress;
-        targetTimestampRef.current = Date.now();
-        settledRef.current = false;
-      },
-    }),
-    []
-  );
-
-  useEffect(() => {
-    let frameId: number;
-
-    const tick = () => {
-      frameId = requestAnimationFrame(tick);
-      if (settledRef.current) return;
-
-      const prev = prevRef.current;
-      const target = targetRef.current;
-      if (prev == null || target == null) {
-        // Gauge appearing/disappearing (person present/absent) — nothing to
-        // interpolate from, so snap.
-        setProgress(target);
-        settledRef.current = true;
-        return;
-      }
-
-      const duration = Math.max(1, targetTimestampRef.current - prevTimestampRef.current);
-      const t = Math.min(1, (Date.now() - targetTimestampRef.current) / duration);
-      setProgress(prev + (target - prev) * t);
-      if (t >= 1) settledRef.current = true;
-    };
-
-    frameId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frameId);
-  }, []);
-
-  if (progress == null) return null;
-
-  return (
-    <View style={styles.gaugeTrack}>
-      <View style={[styles.gaugeZone, { flex: 0.2, backgroundColor: '#FF4D4D' }]} />
-      <View style={[styles.gaugeZone, { flex: 0.6, backgroundColor: '#3B82F6' }]} />
-      <View style={[styles.gaugeZone, { flex: 0.2, backgroundColor: '#39FF88' }]} />
-      <View style={[styles.gaugeDot, { top: progress * (GAUGE_HEIGHT - GAUGE_DOT_SIZE) }]} />
-    </View>
-  );
-});
-
-/**
- * Cycles a stage's monster animation frames (see STAGE_MONSTER_ART).
- * Renders nothing if the stage has no art yet. When `hitSignal` is given and
- * changes value (pass the live rep count — count changes exactly when a rep
- * lands), plays the stage's `attacked` clip once before falling back to idle.
- */
-function MonsterSprite({ stageId, size, hitSignal }: { stageId: string; size: number; hitSignal?: number }) {
-  const art = STAGE_MONSTER_ART[stageId];
-  const [frameIndex, setFrameIndex] = useState(0);
-  const [showAttacked, setShowAttacked] = useState(false);
-  const prevHitSignalRef = useRef(hitSignal);
-
-  // Detect a "hit" (hitSignal went up, e.g. the rep count incrementing) and
-  // switch to the attacked clip for the duration of one playthrough. Only
-  // increases count as a hit — resetting the stage (count dropping back to
-  // 0) shouldn't flash the attacked animation.
-  useEffect(() => {
-    const changed =
-      hitSignal != null && prevHitSignalRef.current != null && hitSignal > prevHitSignalRef.current;
-    prevHitSignalRef.current = hitSignal;
-    if (!changed || art?.attacked == null) return;
-    setShowAttacked(true);
-    const attacked = art.attacked;
-    const timeout = setTimeout(() => setShowAttacked(false), (1000 / attacked.fps) * attacked.frames.length);
-    return () => clearTimeout(timeout);
-  }, [hitSignal, art]);
-
-  const clip = showAttacked ? art?.attacked : art?.idle;
-
-  useEffect(() => {
-    if (clip == null) return;
-    setFrameIndex(0);
-    const interval = setInterval(() => {
-      setFrameIndex((i) => (i + 1) % clip.frames.length);
-    }, 1000 / clip.fps);
-    return () => clearInterval(interval);
-  }, [clip]);
-
-  if (clip == null) return null;
-  return (
-    <Image
-      source={clip.frames[frameIndex]}
-      style={{ width: size, height: size }}
-      resizeMode="contain"
-    />
-  );
 }
 
 export default function CameraScreen() {
@@ -1015,6 +781,14 @@ export default function CameraScreen() {
           </View>
         )}
 
+        {mode === 'adventure' && phase === 'tracking' && (
+          <View style={styles.countdownClockCenter} pointerEvents="none">
+            <View style={styles.countdownClockPill}>
+              <CountdownClock active={phase === 'tracking'} startRef={sessionStartRef} limitSec={timeLimitSec} />
+            </View>
+          </View>
+        )}
+
         {phase === 'calibrating' && (
           <View style={styles.calibrationOverlay}>
             <Text style={styles.calibrationCountdown}>{calibrationSecondsLeft}</Text>
@@ -1123,14 +897,14 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     alignItems: 'center',
-    backgroundColor: '#0B0B0F',
+    backgroundColor: '#F0F9FF',
     paddingTop: 12,
   },
   center: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#0B0B0F',
+    backgroundColor: '#F0F9FF',
     padding: 24,
     gap: 16,
   },
@@ -1144,10 +918,10 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 12,
     borderRadius: 999,
-    backgroundColor: '#1E1E27',
+    backgroundColor: '#E0F2FE',
   },
   backButtonText: {
-    color: '#8A8A93',
+    color: TEXT_MUTED,
     fontSize: 14,
     fontWeight: '600',
   },
@@ -1156,26 +930,28 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   modeSelectTitle: {
-    color: '#FFFFFF',
+    color: TEXT_PRIMARY,
     fontSize: 22,
     fontWeight: '800',
     marginBottom: 8,
   },
   modeButton: {
     width: '100%',
-    backgroundColor: '#1E1E27',
+    backgroundColor: '#FFFFFF',
     borderRadius: 16,
     paddingVertical: 18,
     paddingHorizontal: 20,
     gap: 6,
+    borderWidth: 1,
+    borderColor: '#DBEAFE',
   },
   modeButtonTitle: {
-    color: '#39FF88',
+    color: ACCENT,
     fontSize: 18,
     fontWeight: '800',
   },
   modeButtonDesc: {
-    color: '#8A8A93',
+    color: TEXT_MUTED,
     fontSize: 13,
   },
   modeButtonLocked: {
@@ -1191,7 +967,7 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   stageInfoText: {
-    color: '#8A8A93',
+    color: TEXT_MUTED,
     fontSize: 13,
     fontWeight: '600',
     marginTop: -6,
@@ -1207,7 +983,22 @@ const styles = StyleSheet.create({
   },
   recordTimerBarFill: {
     height: '100%',
-    backgroundColor: '#39FF88',
+    backgroundColor: ACCENT_ON_DARK,
+  },
+  countdownClockCenter: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  countdownClockPill: {
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+    borderRadius: 24,
+    backgroundColor: 'rgba(0,0,0,0.5)',
   },
   bossCard: {
     position: 'absolute',
@@ -1262,7 +1053,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   resultStats: {
-    color: '#39FF88',
+    color: ACCENT_ON_DARK,
     fontSize: 64,
     fontWeight: '800',
   },
@@ -1270,21 +1061,21 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 18,
     borderRadius: 999,
-    backgroundColor: '#1E1E27',
+    backgroundColor: '#E0F2FE',
   },
   tabActive: {
-    backgroundColor: '#39FF88',
+    backgroundColor: ACCENT,
   },
   tabDisabled: {
     opacity: 0.4,
   },
   tabText: {
-    color: '#8A8A93',
+    color: TEXT_MUTED,
     fontSize: 14,
     fontWeight: '600',
   },
   tabTextActive: {
-    color: '#0B0B0F',
+    color: TEXT_ON_ACCENT,
   },
   cameraBox: {
     overflow: 'hidden',
@@ -1317,7 +1108,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   calibrationCountdown: {
-    color: '#39FF88',
+    color: ACCENT_ON_DARK,
     fontSize: 96,
     fontWeight: '800',
   },
@@ -1328,54 +1119,31 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingHorizontal: 24,
   },
-  gaugeTrack: {
-    position: 'absolute',
-    left: 16,
-    top: (PREVIEW_SIZE - GAUGE_HEIGHT) / 2,
-    width: GAUGE_WIDTH,
-    height: GAUGE_HEIGHT,
-    borderRadius: GAUGE_WIDTH / 2,
-    overflow: 'hidden',
-    flexDirection: 'column',
-  },
-  gaugeZone: {
-    width: '100%',
-  },
-  gaugeDot: {
-    position: 'absolute',
-    left: (GAUGE_WIDTH - GAUGE_DOT_SIZE) / 2,
-    width: GAUGE_DOT_SIZE,
-    height: GAUGE_DOT_SIZE,
-    borderRadius: GAUGE_DOT_SIZE / 2,
-    backgroundColor: '#FFFFFF',
-    borderWidth: 2,
-    borderColor: 'rgba(0,0,0,0.2)',
-  },
   counterCard: {
     marginTop: 20,
     alignItems: 'center',
   },
   countLabel: {
-    color: '#8A8A93',
+    color: TEXT_MUTED,
     fontSize: 14,
     letterSpacing: 2,
   },
   countValue: {
-    color: '#39FF88',
+    color: ACCENT,
     fontSize: 88,
     fontWeight: '800',
   },
   countTarget: {
-    color: '#8A8A93',
+    color: TEXT_MUTED,
     fontSize: 32,
     fontWeight: '700',
   },
   stageLabel: {
-    color: '#FFFFFF',
+    color: TEXT_PRIMARY,
     fontSize: 16,
   },
   postureHint: {
-    color: '#FFB020',
+    color: '#D97706',
     fontSize: 14,
     marginTop: 8,
     textAlign: 'center',
@@ -1386,21 +1154,21 @@ const styles = StyleSheet.create({
     marginTop: 20,
   },
   button: {
-    backgroundColor: '#1E1E27',
+    backgroundColor: ACCENT,
     paddingVertical: 14,
     paddingHorizontal: 24,
     borderRadius: 14,
   },
   buttonSecondary: {
-    backgroundColor: '#2A1B1F',
+    backgroundColor: '#64748B',
   },
   buttonText: {
-    color: '#FFFFFF',
+    color: TEXT_ON_ACCENT,
     fontSize: 16,
     fontWeight: '600',
   },
   hint: {
-    color: '#8A8A93',
+    color: TEXT_MUTED,
     fontSize: 14,
     marginTop: 12,
     textAlign: 'center',
