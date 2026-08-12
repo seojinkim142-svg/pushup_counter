@@ -5,7 +5,7 @@ import { subscribeToAuthState } from '../lib/auth';
 import LoginScreen from './LoginScreen';
 import { ACCENT } from './theme';
 
-export default function AuthGate({ children }: { children: React.ReactNode }) {
+export default function AuthGate({ children }: { children: (session: Session) => React.ReactNode }) {
   // undefined: haven't heard from Supabase yet. null: heard, no session.
   const [session, setSession] = useState<Session | null | undefined>(undefined);
 
@@ -21,7 +21,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   if (session == null) {
     return <LoginScreen />;
   }
-  return <>{children}</>;
+  return <>{children(session)}</>;
 }
 
 const styles = StyleSheet.create({

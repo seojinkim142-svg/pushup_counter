@@ -43,7 +43,17 @@ export async function signOut(): Promise<void> {
 
 /** Fires immediately with the current session, then again on every change (sign-in/out/refresh). */
 export function subscribeToAuthState(onChange: (session: Session | null) => void): () => void {
-  supabase.auth.getSession().then(({ data }) => onChange(data.session));
+  // A network failure here (e.g. device briefly offline) must still resolve
+  // to "no session" rather than leaving AuthGate's loading state stuck
+  // forever — the login screen it falls back to has no offline mode either,
+  // but at least it's not an infinite spinner with no way forward.
+  supabase.auth
+    .getSession()
+    .then(({ data }) => onChange(data.session))
+    .catch((e) => {
+      console.warn('getSession failed', e);
+      onChange(null);
+    });
   const {
     data: { subscription },
   } = supabase.auth.onAuthStateChange((_event, session) => onChange(session));

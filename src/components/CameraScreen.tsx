@@ -51,7 +51,8 @@ import {
   subscribeToMatch,
   updateMyCount,
 } from '../lib/versus';
-import { signOut } from '../lib/auth';
+import type { Session } from '@supabase/supabase-js';
+import ProfileScreen from './ProfileScreen';
 import SkeletonOverlay, { type SkeletonOverlayHandle } from './SkeletonOverlay';
 import ProgressGauge, { type ProgressGaugeHandle } from './ProgressGauge';
 import CountdownClock from './CountdownClock';
@@ -162,9 +163,10 @@ function createDisplacementCounter(id: ExerciseId): VerticalRepCounter {
   return new VerticalRepCounter(undefined, undefined, undefined, minCalibrationRange);
 }
 
-export default function CameraScreen() {
+export default function CameraScreen({ session }: { session: Session }) {
   const { hasPermission, requestPermission } = useCameraPermission();
 
+  const [showProfile, setShowProfile] = useState(false);
   const [mode, setMode] = useState<Mode | null>(null);
   const [cameraPosition, setCameraPosition] = useState<CameraPosition>('front');
   const [exercise, setExercise] = useState<ExerciseId>('pushup');
@@ -978,9 +980,18 @@ export default function CameraScreen() {
     return () => subscription.remove();
   }, [mode, phase, selectedStage, adventureExercise, recordSeconds, versusMatchId]);
 
+  if (showProfile) {
+    return <ProfileScreen session={session} onBack={() => setShowProfile(false)} />;
+  }
+
   if (mode == null) {
     return (
       <View style={styles.center}>
+        <Pressable style={styles.profileEntryButton} onPress={() => setShowProfile(true)}>
+          <Text style={styles.profileEntryButtonText}>
+            {(session.user.user_metadata?.full_name as string | undefined) ?? '내 프로필'} ›
+          </Text>
+        </Pressable>
         <Text style={styles.modeSelectTitle}>모드 선택</Text>
         <Pressable style={styles.modeButton} onPress={() => setMode('practice')}>
           <Text style={styles.modeButtonTitle}>연습모드</Text>
@@ -1021,9 +1032,6 @@ export default function CameraScreen() {
         >
           <Text style={styles.modeButtonTitle}>대결모드</Text>
           <Text style={styles.modeButtonDesc}>임의의 상대와 실시간으로 개수를 겨뤄요 (푸시업)</Text>
-        </Pressable>
-        <Pressable style={styles.backButton} onPress={signOut}>
-          <Text style={styles.backButtonText}>로그아웃</Text>
         </Pressable>
       </View>
     );
@@ -1650,6 +1658,18 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '800',
     marginBottom: 8,
+  },
+  profileEntryButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    backgroundColor: '#E0F2FE',
+    marginBottom: 4,
+  },
+  profileEntryButtonText: {
+    color: TEXT_MUTED,
+    fontSize: 13,
+    fontWeight: '600',
   },
   modeButton: {
     width: '100%',

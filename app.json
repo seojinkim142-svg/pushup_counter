@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "push_up_counter",
+    "name": "FreeFit",
     "slug": "push_up_counter",
     "scheme": "pushupcounter",
     "version": "1.0.0",
@@ -9,6 +9,7 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
+      "bundleIdentifier": "com.freefit.pushupcounter",
       "infoPlist": {
         "NSCameraUsageDescription": "$(PRODUCT_NAME)이(가) 푸시업 개수를 세기 위해 카메라를 사용합니다."
       }
@@ -24,7 +25,7 @@
       "permissions": [
         "android.permission.CAMERA"
       ],
-      "package": "com.anonymous.push_up_counter"
+      "package": "com.freefit.pushupcounter"
     },
     "web": {
       "favicon": "./assets/favicon.png"
