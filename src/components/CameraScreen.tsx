@@ -1105,7 +1105,7 @@ export default function CameraScreen({ session }: { session: Session }) {
                 <MonsterSprite stageId={s.id} size={48} />
                 <View style={styles.stageButtonText}>
                   <Text style={styles.modeButtonTitle}>
-                    {s.label} {isCleared ? '✓' : !unlocked ? '🔒' : ''}
+                    {s.label} {isCleared ? '✓' : ''}
                   </Text>
                   <Text style={styles.modeButtonDesc}>
                     {EXERCISES[s.exercise].label} {s.targetCount}회 · {s.timeLimitSec}초 안에
@@ -1289,7 +1289,7 @@ export default function CameraScreen({ session }: { session: Session }) {
     } else if (mode === 'routine') {
       resultTitle = '오늘 루틴 완료!';
     } else if (mode === 'versus') {
-      if (sessionResult.count > versusOpponentCount) resultTitle = '승리! 🎉';
+      if (sessionResult.count > versusOpponentCount) resultTitle = '승리!';
       else if (sessionResult.count < versusOpponentCount) resultTitle = '패배...';
       else resultTitle = '무승부';
     } else {
