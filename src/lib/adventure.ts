@@ -12,7 +12,10 @@ export type StageConfig = {
 };
 
 type ChapterExercise = 'pushup' | 'squat' | 'jumpingJack';
-type StageDifficulty = { targetCount: number; timeLimitSec: number };
+
+// Flat pace: every stage gets exactly 2 seconds per rep (e.g. a 4-rep stage
+// gets 8 seconds), regardless of exercise or chapter.
+const SECONDS_PER_REP = 2;
 
 // Each of the three real exercises (armCurlTest is a tuning aid, not a real
 // workout, so it's excluded here) gets its own independent stage chain,
@@ -21,143 +24,52 @@ type StageDifficulty = { targetCount: number; timeLimitSec: number };
 // chapter's first stage (N-1) is unlocked from the start — chapters are
 // browsed via 다음장/이전장 rather than earned by clearing the previous
 // chapter — but within a chapter, stages 2-5 still require the previous one
-// in that same chapter to be cleared (see isStageUnlocked). Difficulty
-// climbs both within a chapter and from one chapter to the next — later
-// stages get both a higher target count and less time per rep.
-const CHAPTER_PROGRESSIONS: Record<ChapterExercise, StageDifficulty[]>[] = [
+// in that same chapter to be cleared (see isStageUnlocked). Target counts
+// climb both within a chapter and from one chapter to the next.
+const CHAPTER_PROGRESSIONS: Record<ChapterExercise, number[]>[] = [
   {
     // Chapter 1
-    pushup: [
-      { targetCount: 4, timeLimitSec: 30 },
-      { targetCount: 6, timeLimitSec: 30 },
-      { targetCount: 8, timeLimitSec: 32 },
-      { targetCount: 10, timeLimitSec: 34 },
-      { targetCount: 12, timeLimitSec: 36 },
-    ],
-    squat: [
-      { targetCount: 8, timeLimitSec: 30 },
-      { targetCount: 12, timeLimitSec: 30 },
-      { targetCount: 15, timeLimitSec: 32 },
-      { targetCount: 18, timeLimitSec: 34 },
-      { targetCount: 22, timeLimitSec: 36 },
-    ],
-    jumpingJack: [
-      { targetCount: 15, timeLimitSec: 25 },
-      { targetCount: 20, timeLimitSec: 26 },
-      { targetCount: 25, timeLimitSec: 27 },
-      { targetCount: 30, timeLimitSec: 28 },
-      { targetCount: 35, timeLimitSec: 30 },
-    ],
+    pushup: [4, 6, 8, 10, 12],
+    squat: [8, 12, 15, 18, 22],
+    jumpingJack: [15, 20, 25, 30, 35],
   },
   {
     // Chapter 2
-    pushup: [
-      { targetCount: 16, timeLimitSec: 36 },
-      { targetCount: 18, timeLimitSec: 36 },
-      { targetCount: 20, timeLimitSec: 38 },
-      { targetCount: 22, timeLimitSec: 38 },
-      { targetCount: 24, timeLimitSec: 40 },
-    ],
-    squat: [
-      { targetCount: 25, timeLimitSec: 36 },
-      { targetCount: 28, timeLimitSec: 36 },
-      { targetCount: 32, timeLimitSec: 38 },
-      { targetCount: 36, timeLimitSec: 38 },
-      { targetCount: 40, timeLimitSec: 40 },
-    ],
-    jumpingJack: [
-      { targetCount: 40, timeLimitSec: 30 },
-      { targetCount: 45, timeLimitSec: 31 },
-      { targetCount: 50, timeLimitSec: 32 },
-      { targetCount: 55, timeLimitSec: 33 },
-      { targetCount: 60, timeLimitSec: 35 },
-    ],
+    pushup: [16, 18, 20, 22, 24],
+    squat: [25, 28, 32, 36, 40],
+    jumpingJack: [40, 45, 50, 55, 60],
   },
   {
     // Chapter 3
-    pushup: [
-      { targetCount: 28, timeLimitSec: 40 },
-      { targetCount: 30, timeLimitSec: 40 },
-      { targetCount: 32, timeLimitSec: 42 },
-      { targetCount: 34, timeLimitSec: 42 },
-      { targetCount: 36, timeLimitSec: 44 },
-    ],
-    squat: [
-      { targetCount: 43, timeLimitSec: 40 },
-      { targetCount: 46, timeLimitSec: 40 },
-      { targetCount: 50, timeLimitSec: 42 },
-      { targetCount: 54, timeLimitSec: 42 },
-      { targetCount: 58, timeLimitSec: 44 },
-    ],
-    jumpingJack: [
-      { targetCount: 65, timeLimitSec: 35 },
-      { targetCount: 70, timeLimitSec: 36 },
-      { targetCount: 75, timeLimitSec: 37 },
-      { targetCount: 80, timeLimitSec: 38 },
-      { targetCount: 85, timeLimitSec: 40 },
-    ],
+    pushup: [28, 30, 32, 34, 36],
+    squat: [43, 46, 50, 54, 58],
+    jumpingJack: [65, 70, 75, 80, 85],
   },
   {
     // Chapter 4
-    pushup: [
-      { targetCount: 40, timeLimitSec: 44 },
-      { targetCount: 42, timeLimitSec: 44 },
-      { targetCount: 44, timeLimitSec: 46 },
-      { targetCount: 46, timeLimitSec: 46 },
-      { targetCount: 48, timeLimitSec: 48 },
-    ],
-    squat: [
-      { targetCount: 61, timeLimitSec: 44 },
-      { targetCount: 64, timeLimitSec: 44 },
-      { targetCount: 68, timeLimitSec: 46 },
-      { targetCount: 72, timeLimitSec: 46 },
-      { targetCount: 76, timeLimitSec: 48 },
-    ],
-    jumpingJack: [
-      { targetCount: 90, timeLimitSec: 40 },
-      { targetCount: 95, timeLimitSec: 41 },
-      { targetCount: 100, timeLimitSec: 42 },
-      { targetCount: 105, timeLimitSec: 43 },
-      { targetCount: 110, timeLimitSec: 45 },
-    ],
+    pushup: [40, 42, 44, 46, 48],
+    squat: [61, 64, 68, 72, 76],
+    jumpingJack: [90, 95, 100, 105, 110],
   },
   {
     // Chapter 5
-    pushup: [
-      { targetCount: 52, timeLimitSec: 48 },
-      { targetCount: 54, timeLimitSec: 48 },
-      { targetCount: 56, timeLimitSec: 50 },
-      { targetCount: 58, timeLimitSec: 50 },
-      { targetCount: 60, timeLimitSec: 52 },
-    ],
-    squat: [
-      { targetCount: 79, timeLimitSec: 48 },
-      { targetCount: 82, timeLimitSec: 48 },
-      { targetCount: 86, timeLimitSec: 50 },
-      { targetCount: 90, timeLimitSec: 50 },
-      { targetCount: 94, timeLimitSec: 52 },
-    ],
-    jumpingJack: [
-      { targetCount: 115, timeLimitSec: 45 },
-      { targetCount: 120, timeLimitSec: 46 },
-      { targetCount: 125, timeLimitSec: 47 },
-      { targetCount: 130, timeLimitSec: 48 },
-      { targetCount: 135, timeLimitSec: 50 },
-    ],
+    pushup: [52, 54, 56, 58, 60],
+    squat: [79, 82, 86, 90, 94],
+    jumpingJack: [115, 120, 125, 130, 135],
   },
 ];
 
 export const ADVENTURE_STAGES: StageConfig[] = (Object.keys(CHAPTER_PROGRESSIONS[0]) as ChapterExercise[]).flatMap(
   (exercise) =>
     CHAPTER_PROGRESSIONS.flatMap((chapterProgression, chapterIndex) =>
-      chapterProgression[exercise].map((cfg, i) => ({
+      chapterProgression[exercise].map((targetCount, i) => ({
         id: `${exercise}-${chapterIndex + 1}-${i + 1}`,
         chapter: chapterIndex + 1,
         stageNumber: i + 1,
         label: `${chapterIndex + 1}-${i + 1}`,
         exercise,
-        targetCount: cfg.targetCount,
-        timeLimitSec: cfg.timeLimitSec,
+        targetCount,
+        timeLimitSec: targetCount * SECONDS_PER_REP,
       }))
     )
 );
