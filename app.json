@@ -2,6 +2,7 @@
   "expo": {
     "name": "FreeFit",
     "slug": "push_up_counter",
+    "owner": "tjwls2123",
     "scheme": "pushupcounter",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -40,6 +41,11 @@
       ],
       "./plugins/withMediaPipeModel.js",
       "expo-web-browser"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "535e0b91-fbee-4644-bbda-9606c21586fe"
+      }
+    }
   }
 }
