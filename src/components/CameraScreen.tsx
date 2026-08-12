@@ -883,14 +883,19 @@ export default function CameraScreen({ session }: { session: Session }) {
     try {
       const { id: userId } = await getCurrentPlayer();
       versusUserIdRef.current = userId;
+      // Subscribe before calling try_match() (not after) — try_match() is
+      // what inserts our row into matchmaking_queue, so if we subscribed
+      // afterward, an opponent's try_match() landing in that gap would
+      // create a match we'd never hear about, leaving us stuck "찾는 중"
+      // forever. beginVersusMatch() below unsubscribes this if try_match()
+      // already found us an opponent immediately, so it's never left dangling.
+      versusUnsubscribeIncomingRef.current?.();
+      versusUnsubscribeIncomingRef.current = subscribeToIncomingMatch(userId, (foundMatchId) => {
+        beginVersusMatch(foundMatchId);
+      });
       const matchId = await startMatchmaking();
       if (matchId != null) {
         await beginVersusMatch(matchId);
-      } else {
-        versusUnsubscribeIncomingRef.current?.();
-        versusUnsubscribeIncomingRef.current = subscribeToIncomingMatch(userId, (foundMatchId) => {
-          beginVersusMatch(foundMatchId);
-        });
       }
     } catch (e) {
       console.warn('versus matchmaking failed', e);
@@ -1599,20 +1604,28 @@ export default function CameraScreen({ session }: { session: Session }) {
         )}
       </View>
 
-      <View style={styles.controls}>
-        {mode === 'routine' && routineProgress == null && phase === 'tracking' ? (
-          <Pressable style={styles.button} onPress={handleFinishBaselineTest}>
-            <Text style={styles.buttonText}>측정 종료</Text>
+      {mode !== 'versus' && (
+        // Versus mid-match/result has no "정지"/"초기화" here — those bypassed
+        // handleLeaveVersusMatch() entirely (no unsubscribe, no forfeit, no
+        // server-side sync), leaving a zombie subscription and a local-only
+        // reset that diverged from the opponent's view. Leaving/retrying a
+        // versus match only ever goes through the back button or the result
+        // screen's own buttons, both of which call handleLeaveVersusMatch().
+        <View style={styles.controls}>
+          {mode === 'routine' && routineProgress == null && phase === 'tracking' ? (
+            <Pressable style={styles.button} onPress={handleFinishBaselineTest}>
+              <Text style={styles.buttonText}>측정 종료</Text>
+            </Pressable>
+          ) : (
+            <Pressable style={styles.button} onPress={phase === 'idle' ? handleStart : handleStop}>
+              <Text style={styles.buttonText}>{phase === 'idle' ? '시작' : '정지'}</Text>
+            </Pressable>
+          )}
+          <Pressable style={[styles.button, styles.buttonSecondary]} onPress={handleReset}>
+            <Text style={styles.buttonText}>초기화</Text>
           </Pressable>
-        ) : (
-          <Pressable style={styles.button} onPress={phase === 'idle' ? handleStart : handleStop}>
-            <Text style={styles.buttonText}>{phase === 'idle' ? '시작' : '정지'}</Text>
-          </Pressable>
-        )}
-        <Pressable style={[styles.button, styles.buttonSecondary]} onPress={handleReset}>
-          <Text style={styles.buttonText}>초기화</Text>
-        </Pressable>
-      </View>
+        </View>
+      )}
     </View>
   );
 }
