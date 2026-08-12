@@ -41,6 +41,16 @@ import {
   startingWeek,
   type RoutineProgress,
 } from '../lib/routine';
+import {
+  cancelMatchmaking,
+  ensureAnonymousSession,
+  finishMatch,
+  getMatch,
+  startMatchmaking,
+  subscribeToIncomingMatch,
+  subscribeToMatch,
+  updateMyCount,
+} from '../lib/versus';
 import SkeletonOverlay, { type SkeletonOverlayHandle } from './SkeletonOverlay';
 import ProgressGauge, { type ProgressGaugeHandle } from './ProgressGauge';
 import CountdownClock from './CountdownClock';
@@ -98,14 +108,19 @@ const POSTURE_GRACE_MS = 1000;
 // record mode's red-zone/posture disqualification ruleset. 'routine': fixed
 // 6-week push-up program — a one-time untimed baseline test picks a
 // difficulty track, then each day is a sequence of sets (target count, then
-// a rest timer) with no overall time limit or disqualification.
-type Mode = 'practice' | 'record' | 'adventure' | 'routine';
+// a rest timer) with no overall time limit or disqualification. 'versus':
+// random-matchmaking PvP (see src/lib/versus.ts) — both players' clocks are
+// synced off the match row's server started_at, no red-zone/posture
+// disqualification (a live opponent race shouldn't eliminate someone for
+// resting a beat), just a shared countdown and live counts.
+type Mode = 'practice' | 'record' | 'adventure' | 'routine' | 'versus';
 
 const MODE_LABELS: Record<Mode, string> = {
   practice: '연습모드',
   record: '기록모드',
   adventure: '모험모드',
   routine: '루틴모드',
+  versus: '대결모드',
 };
 
 // 'cleared': adventure-only — reached the stage's target count in time.
@@ -179,6 +194,13 @@ export default function CameraScreen() {
   const [routineProgress, setRoutineProgress] = useState<RoutineProgress | null>(null);
   const [routineSetIndex, setRoutineSetIndex] = useState(0);
   const [restSecondsLeft, setRestSecondsLeft] = useState(0);
+  // Versus mode only: null while on the matching-intro/searching screen, set
+  // once try_match() (ours or the opponent's) pairs us with someone — see
+  // src/lib/versus.ts. versusSearching distinguishes "haven't pressed 매칭
+  // 시작 yet" from "waiting for an opponent" on that same screen.
+  const [versusMatchId, setVersusMatchId] = useState<string | null>(null);
+  const [versusSearching, setVersusSearching] = useState(false);
+  const [versusOpponentCount, setVersusOpponentCount] = useState(0);
   const exerciseConfig = EXERCISES[exercise];
 
   // Stage-list screen only: which chapter page is showing — only one
@@ -240,6 +262,12 @@ export default function CameraScreen() {
   const recordSecondsRef = useRef<number | null>(null);
   const routineProgressRef = useRef<RoutineProgress | null>(null);
   const routineSetIndexRef = useRef(0);
+  const versusMatchIdRef = useRef<string | null>(null);
+  const versusUserIdRef = useRef<string | null>(null);
+  const versusMatchStartedAtRef = useRef<string | null>(null);
+  const versusMatchDurationRef = useRef(60);
+  const versusUnsubscribeMatchRef = useRef<(() => void) | null>(null);
+  const versusUnsubscribeIncomingRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     selectedStageRef.current = selectedStage;
@@ -256,6 +284,9 @@ export default function CameraScreen() {
   useEffect(() => {
     routineSetIndexRef.current = routineSetIndex;
   }, [routineSetIndex]);
+  useEffect(() => {
+    versusMatchIdRef.current = versusMatchId;
+  }, [versusMatchId]);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -303,6 +334,22 @@ export default function CameraScreen() {
         const { week, day, track } = routineProgressRef.current;
         const sets = getRoutineDaySets(week, day, track);
         targetCountRef.current = sets[routineSetIndexRef.current] ?? null;
+      } else if (modeRef.current === 'versus' && versusMatchIdRef.current != null) {
+        // No fixed target — race the clock and the opponent's live count
+        // instead. sessionStartRef is the match's server started_at (not
+        // this device's calibration-end time) so both players' countdowns
+        // agree regardless of any difference in how long each side's
+        // calibration hold took.
+        const startedAtMs =
+          versusMatchStartedAtRef.current != null ? new Date(versusMatchStartedAtRef.current).getTime() : Date.now();
+        const durationSec = versusMatchDurationRef.current;
+        const remaining = Math.max(0, Math.round(durationSec - (Date.now() - startedAtMs) / 1000));
+        sessionTimeLimitRef.current = durationSec;
+        targetCountRef.current = null;
+        sessionStartRef.current = startedAtMs;
+        redZoneEnteredAtRef.current = null;
+        setTimeLeftSec(remaining);
+        setTimeLimitSec(durationSec);
       }
       setPhase('tracking');
       return;
@@ -330,10 +377,19 @@ export default function CameraScreen() {
     }
   }, []);
 
-  // record/adventure's countdown — only runs while actually tracking.
+  // record/adventure/versus's countdown — only runs while actually tracking.
   useEffect(() => {
-    if (!isTimedMode(mode) || phase !== 'tracking') return;
+    if ((!isTimedMode(mode) && mode !== 'versus') || phase !== 'tracking') return;
     if (timeLeftSec <= 0) {
+      if (mode === 'versus' && versusMatchIdRef.current != null) {
+        // Marks the match 'finished' server-side so the opponent's
+        // subscription picks it up even if their own local clock (started
+        // from the same server timestamp, but ticking independently) hasn't
+        // quite reached zero yet.
+        finishMatch(versusMatchIdRef.current);
+        versusUnsubscribeMatchRef.current?.();
+        versusUnsubscribeMatchRef.current = null;
+      }
       endSession('time');
       return;
     }
@@ -427,14 +483,20 @@ export default function CameraScreen() {
         }
       };
 
-      // Adventure/routine: reaching the current target ends the attempt
-      // immediately rather than waiting for time to run out. Adventure
-      // clears the stage outright (endSession); routine instead starts that
-      // day's rest timer before moving on to the next set (see the
-      // 'resting' phase effect below) — a null routineProgressRef means
-      // this is the untimed baseline test instead, which has no target to
-      // reach (targetCountRef stays null, so this is a no-op).
+      // Runs after every counted rep. Adventure/routine: reaching the
+      // current target ends the attempt immediately rather than waiting for
+      // time to run out — adventure clears the stage outright (endSession);
+      // routine instead starts that day's rest timer before moving on to
+      // the next set (see the 'resting' phase effect below); a null
+      // routineProgressRef means this is the untimed baseline test instead,
+      // which has no target to reach (targetCountRef stays null, so this is
+      // a no-op). Versus has no target at all — it just pushes the new
+      // count to the match row so the opponent's live view updates.
       const checkTargetReached = () => {
+        if (modeRef.current === 'versus' && versusMatchIdRef.current != null) {
+          updateMyCount(versusMatchIdRef.current, countRef.current);
+          return;
+        }
         if (targetCountRef.current == null || countRef.current < targetCountRef.current) return;
         if (modeRef.current === 'adventure') {
           endSession('cleared');
@@ -774,6 +836,84 @@ export default function CameraScreen() {
     clearRoutineProgress();
   };
 
+  // Versus mode: called once a match id is known, whether from our own
+  // startMatchmaking() call (opponent was already waiting) or from
+  // subscribeToIncomingMatch (we were the one waiting). Fetches the match
+  // row once for its started_at/duration/initial opponent count, subscribes
+  // to further live updates, then enters the shared calibrating→tracking
+  // flow exactly like every other mode's 시작 button.
+  const beginVersusMatch = async (matchId: string) => {
+    versusUnsubscribeIncomingRef.current?.();
+    versusUnsubscribeIncomingRef.current = null;
+
+    const match = await getMatch(matchId);
+    if (match == null) {
+      setVersusSearching(false);
+      return;
+    }
+    const myId = versusUserIdRef.current;
+    versusMatchStartedAtRef.current = match.started_at;
+    versusMatchDurationRef.current = match.duration_sec;
+    setVersusOpponentCount(match.player1_id === myId ? match.player2_count : match.player1_count);
+
+    versusUnsubscribeMatchRef.current?.();
+    versusUnsubscribeMatchRef.current = subscribeToMatch(matchId, (updated) => {
+      const opponentCount = updated.player1_id === myId ? updated.player2_count : updated.player1_count;
+      setVersusOpponentCount(opponentCount);
+      if (updated.status === 'finished' && phaseRef.current === 'tracking') {
+        // The opponent's clock (started from the same server timestamp,
+        // but ticking independently on their device) hit zero first —
+        // wrap up our side too instead of waiting for our own to catch up.
+        versusUnsubscribeMatchRef.current?.();
+        versusUnsubscribeMatchRef.current = null;
+        endSession('time');
+      }
+    });
+
+    setVersusSearching(false);
+    setVersusMatchId(matchId);
+    handleStart();
+  };
+
+  const handleStartVersusMatchmaking = async () => {
+    setVersusSearching(true);
+    try {
+      const userId = await ensureAnonymousSession();
+      versusUserIdRef.current = userId;
+      const matchId = await startMatchmaking();
+      if (matchId != null) {
+        await beginVersusMatch(matchId);
+      } else {
+        versusUnsubscribeIncomingRef.current?.();
+        versusUnsubscribeIncomingRef.current = subscribeToIncomingMatch(userId, (foundMatchId) => {
+          beginVersusMatch(foundMatchId);
+        });
+      }
+    } catch (e) {
+      console.warn('versus matchmaking failed', e);
+      setVersusSearching(false);
+    }
+  };
+
+  const handleCancelVersusMatchmaking = () => {
+    versusUnsubscribeIncomingRef.current?.();
+    versusUnsubscribeIncomingRef.current = null;
+    setVersusSearching(false);
+    cancelMatchmaking();
+  };
+
+  // Leaves the current match (forfeit, or just "다시 매칭" after a finished
+  // one) — unsubscribes and drops back to the matching-intro screen
+  // (versusMatchId == null). Used by both the result screen's "다시 매칭"
+  // button and the back-navigation forfeit path below.
+  const handleLeaveVersusMatch = () => {
+    versusUnsubscribeMatchRef.current?.();
+    versusUnsubscribeMatchRef.current = null;
+    setVersusMatchId(null);
+    setVersusOpponentCount(0);
+    handleReset();
+  };
+
   // Drives the rest countdown between sets: ticks restSecondsLeft down once
   // a second, then either starts the next set's calibration hold (same
   // handleStart() flow as pressing 시작) or, if that was the day's last set,
@@ -820,13 +960,22 @@ export default function CameraScreen() {
         // Mid-workout — handleStop() above already drops phase back to
         // 'idle', which re-renders into the baseline-intro/day-select
         // screen on its own; nothing else to do here.
+      } else if (mode === 'versus' && versusMatchId != null) {
+        // Mid-match or on its result screen — forfeit/leave, back to the
+        // matching-intro screen (still inside versus mode).
+        handleLeaveVersusMatch();
+      } else if (mode === 'versus') {
+        // On the matching-intro/searching screen itself — back exits versus
+        // mode entirely.
+        handleCancelVersusMatchmaking();
+        setMode(null);
       } else {
         setMode(null);
       }
       return true;
     });
     return () => subscription.remove();
-  }, [mode, phase, selectedStage, adventureExercise, recordSeconds]);
+  }, [mode, phase, selectedStage, adventureExercise, recordSeconds, versusMatchId]);
 
   if (mode == null) {
     return (
@@ -858,6 +1007,19 @@ export default function CameraScreen() {
         >
           <Text style={styles.modeButtonTitle}>루틴모드</Text>
           <Text style={styles.modeButtonDesc}>6주 푸시업 프로그램 · 세트와 휴식으로 진행해요</Text>
+        </Pressable>
+        <Pressable
+          style={styles.modeButton}
+          onPress={() => {
+            setMode('versus');
+            if (exercise !== 'pushup') {
+              setExercise('pushup');
+              displacementCounterRef.current = createDisplacementCounter('pushup');
+            }
+          }}
+        >
+          <Text style={styles.modeButtonTitle}>대결모드</Text>
+          <Text style={styles.modeButtonDesc}>임의의 상대와 실시간으로 개수를 겨뤄요 (푸시업)</Text>
         </Pressable>
       </View>
     );
@@ -1041,6 +1203,51 @@ export default function CameraScreen() {
     );
   }
 
+  // Versus mode, not currently matched (still on the matching-intro screen,
+  // whether waiting or not — see versusSearching). Once matched,
+  // beginVersusMatch() sets versusMatchId and calls handleStart(), which
+  // falls through to the shared tracking screen below instead of this one.
+  if (mode === 'versus' && versusMatchId == null) {
+    return (
+      <View style={[styles.center, { padding: 0 }]}>
+        <View style={styles.stageListTopBar}>
+          <Pressable
+            style={styles.backButton}
+            onPress={() => {
+              handleCancelVersusMatchmaking();
+              setMode(null);
+            }}
+          >
+            <Text style={styles.backButtonText}>‹ 모드 선택</Text>
+          </Pressable>
+          <View style={styles.stageListTitleOverlay} pointerEvents="none">
+            <Text style={styles.stageListTopBarTitle}>대결모드</Text>
+          </View>
+        </View>
+        <View style={styles.stageListContent}>
+          {versusSearching ? (
+            <>
+              <Text style={styles.modeButtonDesc}>상대를 찾는 중...</Text>
+              <Pressable style={[styles.button, styles.buttonSecondary]} onPress={handleCancelVersusMatchmaking}>
+                <Text style={styles.buttonText}>취소</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <Text style={styles.modeButtonDesc}>
+                임의의 상대와 매칭되면 둘 다 같은 시간에 시작해서 1분 동안 실시간으로 개수를
+                겨뤄요.
+              </Text>
+              <Pressable style={styles.button} onPress={handleStartVersusMatchmaking}>
+                <Text style={styles.buttonText}>매칭 시작</Text>
+              </Pressable>
+            </>
+          )}
+        </View>
+      </View>
+    );
+  }
+
   if (!hasPermission) {
     return (
       <View style={styles.center}>
@@ -1069,6 +1276,10 @@ export default function CameraScreen() {
       }
     } else if (mode === 'routine') {
       resultTitle = '오늘 루틴 완료!';
+    } else if (mode === 'versus') {
+      if (sessionResult.count > versusOpponentCount) resultTitle = '승리! 🎉';
+      else if (sessionResult.count < versusOpponentCount) resultTitle = '패배...';
+      else resultTitle = '무승부';
     } else {
       resultTitle = sessionResult.reason === 'time' ? '시간 종료!' : '레드존 초과로 탈락!';
     }
@@ -1105,6 +1316,10 @@ export default function CameraScreen() {
             } else if (mode === 'routine') {
               // handleStop() above already drops back to the
               // baseline-intro/day-select screen — nothing else to do.
+            } else if (mode === 'versus') {
+              // This button only exists on the tracking screen, i.e. always
+              // mid-match/result here — forfeit/leave back to matching-intro.
+              handleLeaveVersusMatch();
             } else {
               setMode(null);
             }
@@ -1118,14 +1333,18 @@ export default function CameraScreen() {
                 ? routineProgress != null
                   ? `${routineProgress.week}주차 ${routineProgress.day}일차`
                   : '베이스라인 측정'
-                : mode != null
-                  ? MODE_LABELS[mode]
-                  : '모드'}
+                : mode === 'versus'
+                  ? '대결모드'
+                  : mode != null
+                    ? MODE_LABELS[mode]
+                    : '모드'}
           </Text>
         </Pressable>
-        {/* Routine mode is push-up only (fixed by the program), so there's
-            no exercise to switch — the tab bar would just be misleading. */}
-        {mode !== 'routine' && (
+        {/* Routine/versus are push-up only (fixed by the program, or needed
+            so two randomly-matched strangers are racing on the same
+            exercise), so there's no exercise to switch — the tab bar would
+            just be misleading. */}
+        {mode !== 'routine' && mode !== 'versus' && (
           <View style={styles.exerciseTabs}>
             {/* armCurlTest is a tuning aid, not a real workout — hide it in
                 adventure mode's tab bar (record/practice can still reach it). */}
@@ -1185,12 +1404,37 @@ export default function CameraScreen() {
           </View>
         )}
 
-        {isTimedMode(mode) && phase === 'tracking' && (
+        {(isTimedMode(mode) || mode === 'versus') && phase === 'tracking' && (
           // A shrinking bar reads at a glance from across a room — the
           // "30초" text badge this replaced turned out to be unreadable
           // from normal workout distance.
           <View style={styles.recordTimerBarTrack}>
             <View style={[styles.recordTimerBarFill, { width: `${(timeLeftSec / timeLimitSec) * 100}%` }]} />
+          </View>
+        )}
+
+        {mode === 'versus' && (phase === 'tracking' || phase === 'calibrating') && (
+          <View style={styles.versusHud} pointerEvents="none">
+            <View style={styles.versusHudRow}>
+              <View style={styles.versusHudSide}>
+                <Text style={styles.versusHudName}>나</Text>
+                <Text style={styles.versusHudCount}>{count}</Text>
+              </View>
+              <Text style={styles.versusHudTimer}>{phase === 'tracking' ? `${timeLeftSec}s` : 'VS'}</Text>
+              <View style={styles.versusHudSide}>
+                <Text style={styles.versusHudName}>상대</Text>
+                <Text style={[styles.versusHudCount, styles.versusHudCountOpponent]}>{versusOpponentCount}</Text>
+              </View>
+            </View>
+            <View style={styles.versusBarTrack}>
+              <View style={[styles.versusBarFillMine, { flex: count > 0 || versusOpponentCount > 0 ? count : 1 }]} />
+              <View
+                style={[
+                  styles.versusBarFillOpponent,
+                  { flex: count > 0 || versusOpponentCount > 0 ? versusOpponentCount : 1 },
+                ]}
+              />
+            </View>
           </View>
         )}
 
@@ -1233,6 +1477,9 @@ export default function CameraScreen() {
                   {sessionResult.count}
                   {mode === 'adventure' && selectedStage != null ? ` / ${selectedStage.targetCount}` : ''}회
                 </Text>
+                {mode === 'versus' && (
+                  <Text style={styles.calibrationHint}>상대: {versusOpponentCount}회</Text>
+                )}
                 <Text style={styles.calibrationHint}>{sessionResult.elapsedSec}초 동안 기록</Text>
               </>
             )}
@@ -1284,6 +1531,21 @@ export default function CameraScreen() {
                 </Pressable>
                 <Pressable style={[styles.button, styles.buttonSecondary]} onPress={handleReset}>
                   <Text style={styles.buttonText}>요일 메뉴로</Text>
+                </Pressable>
+              </View>
+            ) : mode === 'versus' ? (
+              <View style={styles.controls}>
+                <Pressable style={styles.button} onPress={handleLeaveVersusMatch}>
+                  <Text style={styles.buttonText}>다시 매칭</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.button, styles.buttonSecondary]}
+                  onPress={() => {
+                    handleLeaveVersusMatch();
+                    setMode(null);
+                  }}
+                >
+                  <Text style={styles.buttonText}>모드 선택</Text>
                 </Pressable>
               </View>
             ) : (
@@ -1540,6 +1802,60 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.5)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
+  },
+  versusHud: {
+    position: 'absolute',
+    top: 12,
+    alignSelf: 'center',
+    width: '92%',
+    gap: 8,
+  },
+  versusHudRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  versusHudSide: {
+    alignItems: 'center',
+    gap: 2,
+  },
+  versusHudName: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  versusHudCount: {
+    color: '#39FF88',
+    fontSize: 32,
+    fontWeight: '800',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  versusHudCountOpponent: {
+    color: '#FF4D4D',
+  },
+  versusHudTimer: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  versusBarTrack: {
+    flexDirection: 'row',
+    width: '100%',
+    height: 14,
+    borderRadius: 999,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.25)',
+  },
+  versusBarFillMine: {
+    backgroundColor: '#39FF88',
+  },
+  versusBarFillOpponent: {
+    backgroundColor: '#FF4D4D',
   },
   resultTitle: {
     color: '#FFFFFF',

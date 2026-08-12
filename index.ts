@@ -1,3 +1,6 @@
+// supabase-js expects the standard URL global, which RN doesn't provide —
+// must be imported before anything that touches supabase-js.
+import 'react-native-url-polyfill/auto';
 import { registerRootComponent } from 'expo';
 
 import App from './App';
