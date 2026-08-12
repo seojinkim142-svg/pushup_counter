@@ -32,6 +32,7 @@ import {
 import {
   ROUTINE_DAY_COUNT,
   ROUTINE_WEEK_COUNT,
+  clearRoutineProgress,
   getRoutineDaySets,
   getRoutineRestSec,
   loadRoutineProgress,
@@ -765,6 +766,14 @@ export default function CameraScreen() {
     });
   };
 
+  // Wipes the saved baseline/track/week/day so the day-select screen falls
+  // back to the baseline-intro screen (routineProgress == null) — the only
+  // way to redo the one-time baseline test.
+  const handleResetRoutineBaseline = () => {
+    setRoutineProgress(null);
+    clearRoutineProgress();
+  };
+
   // Drives the rest countdown between sets: ticks restSecondsLeft down once
   // a second, then either starts the next set's calibration hold (same
   // handleStart() flow as pressing 시작) or, if that was the day's last set,
@@ -1024,6 +1033,9 @@ export default function CameraScreen() {
               <Text style={styles.chapterNavButtonText}>다음주</Text>
             </Pressable>
           </View>
+          <Pressable style={styles.backButton} onPress={handleResetRoutineBaseline}>
+            <Text style={styles.backButtonText}>베이스라인 다시 측정</Text>
+          </Pressable>
         </ScrollView>
       </View>
     );

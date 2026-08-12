@@ -314,3 +314,12 @@ export async function saveRoutineProgress(progress: RoutineProgress): Promise<vo
     console.warn('saveRoutineProgress failed', e);
   }
 }
+
+/** Wipes the saved baseline/track/week/day so the baseline test runs again. */
+export async function clearRoutineProgress(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(ROUTINE_PROGRESS_KEY);
+  } catch (e) {
+    console.warn('clearRoutineProgress failed', e);
+  }
+}
