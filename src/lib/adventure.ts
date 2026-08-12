@@ -73,6 +73,78 @@ const CHAPTER_PROGRESSIONS: Record<ChapterExercise, StageDifficulty[]>[] = [
       { targetCount: 60, timeLimitSec: 35 },
     ],
   },
+  {
+    // Chapter 3
+    pushup: [
+      { targetCount: 28, timeLimitSec: 40 },
+      { targetCount: 30, timeLimitSec: 40 },
+      { targetCount: 32, timeLimitSec: 42 },
+      { targetCount: 34, timeLimitSec: 42 },
+      { targetCount: 36, timeLimitSec: 44 },
+    ],
+    squat: [
+      { targetCount: 43, timeLimitSec: 40 },
+      { targetCount: 46, timeLimitSec: 40 },
+      { targetCount: 50, timeLimitSec: 42 },
+      { targetCount: 54, timeLimitSec: 42 },
+      { targetCount: 58, timeLimitSec: 44 },
+    ],
+    jumpingJack: [
+      { targetCount: 65, timeLimitSec: 35 },
+      { targetCount: 70, timeLimitSec: 36 },
+      { targetCount: 75, timeLimitSec: 37 },
+      { targetCount: 80, timeLimitSec: 38 },
+      { targetCount: 85, timeLimitSec: 40 },
+    ],
+  },
+  {
+    // Chapter 4
+    pushup: [
+      { targetCount: 40, timeLimitSec: 44 },
+      { targetCount: 42, timeLimitSec: 44 },
+      { targetCount: 44, timeLimitSec: 46 },
+      { targetCount: 46, timeLimitSec: 46 },
+      { targetCount: 48, timeLimitSec: 48 },
+    ],
+    squat: [
+      { targetCount: 61, timeLimitSec: 44 },
+      { targetCount: 64, timeLimitSec: 44 },
+      { targetCount: 68, timeLimitSec: 46 },
+      { targetCount: 72, timeLimitSec: 46 },
+      { targetCount: 76, timeLimitSec: 48 },
+    ],
+    jumpingJack: [
+      { targetCount: 90, timeLimitSec: 40 },
+      { targetCount: 95, timeLimitSec: 41 },
+      { targetCount: 100, timeLimitSec: 42 },
+      { targetCount: 105, timeLimitSec: 43 },
+      { targetCount: 110, timeLimitSec: 45 },
+    ],
+  },
+  {
+    // Chapter 5
+    pushup: [
+      { targetCount: 52, timeLimitSec: 48 },
+      { targetCount: 54, timeLimitSec: 48 },
+      { targetCount: 56, timeLimitSec: 50 },
+      { targetCount: 58, timeLimitSec: 50 },
+      { targetCount: 60, timeLimitSec: 52 },
+    ],
+    squat: [
+      { targetCount: 79, timeLimitSec: 48 },
+      { targetCount: 82, timeLimitSec: 48 },
+      { targetCount: 86, timeLimitSec: 50 },
+      { targetCount: 90, timeLimitSec: 50 },
+      { targetCount: 94, timeLimitSec: 52 },
+    ],
+    jumpingJack: [
+      { targetCount: 115, timeLimitSec: 45 },
+      { targetCount: 120, timeLimitSec: 46 },
+      { targetCount: 125, timeLimitSec: 47 },
+      { targetCount: 130, timeLimitSec: 48 },
+      { targetCount: 135, timeLimitSec: 50 },
+    ],
+  },
 ];
 
 export const ADVENTURE_STAGES: StageConfig[] = (Object.keys(CHAPTER_PROGRESSIONS[0]) as ChapterExercise[]).flatMap(
@@ -119,17 +191,96 @@ const CHAPTER_1_SLIME: { idle: MonsterClip; attacked: MonsterClip } = {
     fps: 12,
   },
 };
-// No attacked clip yet for the chapter-2 goblin — MonsterSprite already
-// falls back to idle-only when `attacked` is omitted, and the red hit-flash
-// (see MonsterSprite.tsx) covers the "you got hit" feedback either way.
-const CHAPTER_2_GOBLIN: { idle: MonsterClip } = {
+// Chapters 2-5 reuse chapter 1's slime frames hue-shifted to a different
+// color (see scratchpad/recolor.js, run by hand) — same shading/highlights,
+// just a different hue, so each chapter's monster still reads as "a slime"
+// while being visually distinct at a glance. RN's bundler needs static
+// require() calls (no template-literal paths), so each chapter needs its
+// own explicit block below rather than a shared helper function.
+const CHAPTER_2_SLIME: { idle: MonsterClip; attacked: MonsterClip } = {
   idle: {
     frames: [
-      require('../../assets/images/adventure/stage-2-1/frame_0.png'),
-      require('../../assets/images/adventure/stage-2-1/frame_1.png'),
-      require('../../assets/images/adventure/stage-2-1/frame_2.png'),
-      require('../../assets/images/adventure/stage-2-1/frame_3.png'),
-      require('../../assets/images/adventure/stage-2-1/frame_4.png'),
+      require('../../assets/images/adventure/chapter-2-slime/frame_0.png'),
+      require('../../assets/images/adventure/chapter-2-slime/frame_1.png'),
+      require('../../assets/images/adventure/chapter-2-slime/frame_2.png'),
+      require('../../assets/images/adventure/chapter-2-slime/frame_3.png'),
+      require('../../assets/images/adventure/chapter-2-slime/frame_4.png'),
+    ],
+    fps: 12,
+  },
+  attacked: {
+    frames: [
+      require('../../assets/images/adventure/chapter-2-slime-attacked/frame_0.png'),
+      require('../../assets/images/adventure/chapter-2-slime-attacked/frame_1.png'),
+      require('../../assets/images/adventure/chapter-2-slime-attacked/frame_2.png'),
+      require('../../assets/images/adventure/chapter-2-slime-attacked/frame_3.png'),
+      require('../../assets/images/adventure/chapter-2-slime-attacked/frame_4.png'),
+    ],
+    fps: 12,
+  },
+};
+const CHAPTER_3_SLIME: { idle: MonsterClip; attacked: MonsterClip } = {
+  idle: {
+    frames: [
+      require('../../assets/images/adventure/chapter-3-slime/frame_0.png'),
+      require('../../assets/images/adventure/chapter-3-slime/frame_1.png'),
+      require('../../assets/images/adventure/chapter-3-slime/frame_2.png'),
+      require('../../assets/images/adventure/chapter-3-slime/frame_3.png'),
+      require('../../assets/images/adventure/chapter-3-slime/frame_4.png'),
+    ],
+    fps: 12,
+  },
+  attacked: {
+    frames: [
+      require('../../assets/images/adventure/chapter-3-slime-attacked/frame_0.png'),
+      require('../../assets/images/adventure/chapter-3-slime-attacked/frame_1.png'),
+      require('../../assets/images/adventure/chapter-3-slime-attacked/frame_2.png'),
+      require('../../assets/images/adventure/chapter-3-slime-attacked/frame_3.png'),
+      require('../../assets/images/adventure/chapter-3-slime-attacked/frame_4.png'),
+    ],
+    fps: 12,
+  },
+};
+const CHAPTER_4_SLIME: { idle: MonsterClip; attacked: MonsterClip } = {
+  idle: {
+    frames: [
+      require('../../assets/images/adventure/chapter-4-slime/frame_0.png'),
+      require('../../assets/images/adventure/chapter-4-slime/frame_1.png'),
+      require('../../assets/images/adventure/chapter-4-slime/frame_2.png'),
+      require('../../assets/images/adventure/chapter-4-slime/frame_3.png'),
+      require('../../assets/images/adventure/chapter-4-slime/frame_4.png'),
+    ],
+    fps: 12,
+  },
+  attacked: {
+    frames: [
+      require('../../assets/images/adventure/chapter-4-slime-attacked/frame_0.png'),
+      require('../../assets/images/adventure/chapter-4-slime-attacked/frame_1.png'),
+      require('../../assets/images/adventure/chapter-4-slime-attacked/frame_2.png'),
+      require('../../assets/images/adventure/chapter-4-slime-attacked/frame_3.png'),
+      require('../../assets/images/adventure/chapter-4-slime-attacked/frame_4.png'),
+    ],
+    fps: 12,
+  },
+};
+const CHAPTER_5_SLIME: { idle: MonsterClip; attacked: MonsterClip } = {
+  idle: {
+    frames: [
+      require('../../assets/images/adventure/chapter-5-slime/frame_0.png'),
+      require('../../assets/images/adventure/chapter-5-slime/frame_1.png'),
+      require('../../assets/images/adventure/chapter-5-slime/frame_2.png'),
+      require('../../assets/images/adventure/chapter-5-slime/frame_3.png'),
+      require('../../assets/images/adventure/chapter-5-slime/frame_4.png'),
+    ],
+    fps: 12,
+  },
+  attacked: {
+    frames: [
+      require('../../assets/images/adventure/chapter-5-slime-attacked/frame_0.png'),
+      require('../../assets/images/adventure/chapter-5-slime-attacked/frame_1.png'),
+      require('../../assets/images/adventure/chapter-5-slime-attacked/frame_2.png'),
+      require('../../assets/images/adventure/chapter-5-slime-attacked/frame_3.png'),
+      require('../../assets/images/adventure/chapter-5-slime-attacked/frame_4.png'),
     ],
     fps: 12,
   },
@@ -137,8 +288,11 @@ const CHAPTER_2_GOBLIN: { idle: MonsterClip } = {
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 const CHAPTER_MONSTER_ART: Record<number, { idle: MonsterClip; attacked?: MonsterClip }> = {
-  1: CHAPTER_1_SLIME,
-  2: CHAPTER_2_GOBLIN,
+  1: CHAPTER_1_SLIME, // blue
+  2: CHAPTER_2_SLIME, // yellow
+  3: CHAPTER_3_SLIME, // green
+  4: CHAPTER_4_SLIME, // red
+  5: CHAPTER_5_SLIME, // navy
 };
 
 // Per-stage monster animation frames — `attacked` is optional — plays once

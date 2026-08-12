@@ -1,7 +1,7 @@
 import { ADVENTURE_STAGES, isStageUnlocked, nextStage } from '../adventure';
 
 describe('ADVENTURE_STAGES', () => {
-  it('has unique ids, with each exercise labeled 1-1..1-5 then 2-1..2-5', () => {
+  it('has unique ids, with each exercise labeled 1-1..1-5 through 5-1..5-5', () => {
     const ids = ADVENTURE_STAGES.map((s) => s.id);
     expect(new Set(ids).size).toBe(ids.length);
 
@@ -10,8 +10,9 @@ describe('ADVENTURE_STAGES', () => {
       labelsByExercise.set(s.exercise, [...(labelsByExercise.get(s.exercise) ?? []), s.label]);
     }
     expect(labelsByExercise.size).toBe(3);
+    const expectedLabels = [1, 2, 3, 4, 5].flatMap((chapter) => [1, 2, 3, 4, 5].map((n) => `${chapter}-${n}`));
     for (const labels of labelsByExercise.values()) {
-      expect(labels).toEqual(['1-1', '1-2', '1-3', '1-4', '1-5', '2-1', '2-2', '2-3', '2-4', '2-5']);
+      expect(labels).toEqual(expectedLabels);
     }
   });
 });
