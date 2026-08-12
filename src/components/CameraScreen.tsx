@@ -29,6 +29,17 @@ import {
   saveClearedStage,
   type StageConfig,
 } from '../lib/adventure';
+import {
+  ROUTINE_DAY_COUNT,
+  ROUTINE_WEEK_COUNT,
+  getRoutineDaySets,
+  getRoutineRestSec,
+  loadRoutineProgress,
+  resolveTrack,
+  saveRoutineProgress,
+  startingWeek,
+  type RoutineProgress,
+} from '../lib/routine';
 import SkeletonOverlay, { type SkeletonOverlayHandle } from './SkeletonOverlay';
 import ProgressGauge, { type ProgressGaugeHandle } from './ProgressGauge';
 import CountdownClock from './CountdownClock';
@@ -51,8 +62,9 @@ type Stage = 'up' | 'down';
 // into the starting position — no posture/counting logic runs yet, only the
 // verticalDisplacement signal's current value is sampled so it can anchor
 // the range once the countdown ends (see CameraScreen's seedReference call).
-// 'tracking': normal operation.
-type Phase = 'idle' | 'calibrating' | 'tracking';
+// 'tracking': normal operation. 'resting': routine mode only — between sets,
+// waiting out that day's rest timer before the next set's calibration hold.
+type Phase = 'idle' | 'calibrating' | 'tracking' | 'resting';
 
 // How long the user gets to settle into the starting position before
 // tracking begins. Deliberately capturing "this moment is the reference
@@ -82,17 +94,22 @@ const POSTURE_GRACE_MS = 1000;
 // 'record': 60s time limit; resting in the red zone (gauge top 20%) for too
 // long disqualifies the attempt. 'adventure': stage-based mode — clear each
 // stage's target rep count before its own time limit runs out; shares
-// record mode's red-zone/posture disqualification ruleset.
-type Mode = 'practice' | 'record' | 'adventure';
+// record mode's red-zone/posture disqualification ruleset. 'routine': fixed
+// 6-week push-up program — a one-time untimed baseline test picks a
+// difficulty track, then each day is a sequence of sets (target count, then
+// a rest timer) with no overall time limit or disqualification.
+type Mode = 'practice' | 'record' | 'adventure' | 'routine';
 
 const MODE_LABELS: Record<Mode, string> = {
   practice: '연습모드',
   record: '기록모드',
   adventure: '모험모드',
+  routine: '루틴모드',
 };
 
 // 'cleared': adventure-only — reached the stage's target count in time.
-type SessionEndReason = 'time' | 'disqualified' | 'cleared';
+// 'routineDayComplete': routine-only — every set for the day is done.
+type SessionEndReason = 'time' | 'disqualified' | 'cleared' | 'routineDayComplete';
 type SessionResult = { reason: SessionEndReason; count: number; elapsedSec: number };
 
 const RECORD_MODE_SECONDS = 60; // fallback before a duration is chosen
@@ -154,6 +171,13 @@ export default function CameraScreen() {
   // Record mode only: the chosen countdown duration (null = showing the
   // duration-select screen).
   const [recordSeconds, setRecordSeconds] = useState<number | null>(null);
+  // Routine mode only: null until the one-time baseline test is done (see
+  // handleFinishBaselineTest) — persisted via AsyncStorage so it survives
+  // app restarts. routineSetIndex is which set (0-based) within the current
+  // day is active; not persisted — an interrupted day just restarts at set 1.
+  const [routineProgress, setRoutineProgress] = useState<RoutineProgress | null>(null);
+  const [routineSetIndex, setRoutineSetIndex] = useState(0);
+  const [restSecondsLeft, setRestSecondsLeft] = useState(0);
   const exerciseConfig = EXERCISES[exercise];
 
   // Stage-list screen only: which chapter page is showing — only one
@@ -162,6 +186,12 @@ export default function CameraScreen() {
 
   useEffect(() => {
     loadClearedStages().then(setClearedStages);
+  }, []);
+
+  useEffect(() => {
+    loadRoutineProgress().then((p) => {
+      if (p != null) setRoutineProgress(p);
+    });
   }, []);
 
   // Reset the chapter page whenever a different exercise's stage list is
@@ -207,6 +237,8 @@ export default function CameraScreen() {
   const selectedStageRef = useRef<StageConfig | null>(null);
   const clearedStagesRef = useRef<ReadonlySet<string>>(new Set());
   const recordSecondsRef = useRef<number | null>(null);
+  const routineProgressRef = useRef<RoutineProgress | null>(null);
+  const routineSetIndexRef = useRef(0);
 
   useEffect(() => {
     selectedStageRef.current = selectedStage;
@@ -217,6 +249,12 @@ export default function CameraScreen() {
   useEffect(() => {
     recordSecondsRef.current = recordSeconds;
   }, [recordSeconds]);
+  useEffect(() => {
+    routineProgressRef.current = routineProgress;
+  }, [routineProgress]);
+  useEffect(() => {
+    routineSetIndexRef.current = routineSetIndex;
+  }, [routineSetIndex]);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -254,6 +292,16 @@ export default function CameraScreen() {
         redZoneEnteredAtRef.current = null;
         setTimeLeftSec(limit);
         setTimeLimitSec(limit);
+      } else if (modeRef.current === 'routine' && routineProgressRef.current != null) {
+        // Untimed — routine's only pacing is the per-set target + the rest
+        // timer between sets (see the 'resting' phase effect below), no
+        // overall clock. A null routineProgressRef here means this
+        // calibration is for the one-time baseline test instead (see
+        // handleFinishBaselineTest) — targetCountRef stays null so it never
+        // auto-completes, same as practice mode.
+        const { week, day, track } = routineProgressRef.current;
+        const sets = getRoutineDaySets(week, day, track);
+        targetCountRef.current = sets[routineSetIndexRef.current] ?? null;
       }
       setPhase('tracking');
       return;
@@ -378,11 +426,20 @@ export default function CameraScreen() {
         }
       };
 
-      // Adventure mode only: reaching the stage's target count ends the
-      // attempt in success immediately, without waiting for time to run out.
-      const checkAdventureClear = () => {
-        if (targetCountRef.current != null && countRef.current >= targetCountRef.current) {
+      // Adventure/routine: reaching the current target ends the attempt
+      // immediately rather than waiting for time to run out. Adventure
+      // clears the stage outright (endSession); routine instead starts that
+      // day's rest timer before moving on to the next set (see the
+      // 'resting' phase effect below) — a null routineProgressRef means
+      // this is the untimed baseline test instead, which has no target to
+      // reach (targetCountRef stays null, so this is a no-op).
+      const checkTargetReached = () => {
+        if (targetCountRef.current == null || countRef.current < targetCountRef.current) return;
+        if (modeRef.current === 'adventure') {
           endSession('cleared');
+        } else if (modeRef.current === 'routine' && routineProgressRef.current != null) {
+          setRestSecondsLeft(getRoutineRestSec(routineProgressRef.current.week, routineProgressRef.current.day));
+          setPhase('resting');
         }
       };
 
@@ -461,7 +518,7 @@ export default function CameraScreen() {
               if (update.justCounted) {
                 countRef.current = angleCounterRef.current.count;
                 setCount(countRef.current);
-                checkAdventureClear();
+                checkTargetReached();
               }
             }
           } else if (config.signal === 'verticalDisplacement') {
@@ -485,7 +542,7 @@ export default function CameraScreen() {
                 if (update.justCounted) {
                   countRef.current = displacementCounterRef.current.count;
                   setCount(countRef.current);
-                  checkAdventureClear();
+                  checkTargetReached();
                 }
               }
             }
@@ -516,7 +573,7 @@ export default function CameraScreen() {
               if (update.justCounted) {
                 countRef.current = sideAngleCounterRef.current.count;
                 setCount(countRef.current);
-                checkAdventureClear();
+                checkTargetReached();
               }
             }
           }
@@ -582,7 +639,7 @@ export default function CameraScreen() {
     sessionStartRef.current = null;
     sessionTimeLimitRef.current = RECORD_MODE_SECONDS;
     // Always cleared, not just outside adventure mode — otherwise a leftover
-    // target from a previous stage attempt could trigger checkAdventureClear
+    // target from a previous stage attempt could trigger checkTargetReached
     // after switching to practice/record.
     targetCountRef.current = null;
     setCount(0);
@@ -640,6 +697,97 @@ export default function CameraScreen() {
     setPhase('idle');
   };
 
+  // Routine mode's one-time baseline test: an untimed free count (like
+  // practice mode — targetCountRef stays null the whole time, see the
+  // calibration-end effect above), ended by the user instead of a target.
+  // The result picks a difficulty track and starting week (see routine.ts)
+  // and is persisted so it's never asked again.
+  const handleFinishBaselineTest = () => {
+    const baseline = countRef.current;
+    const progress: RoutineProgress = {
+      baseline,
+      track: resolveTrack(baseline),
+      week: startingWeek(baseline),
+      day: 1,
+    };
+    handleReset();
+    setRoutineProgress(progress);
+    saveRoutineProgress(progress);
+  };
+
+  // Routine mode: (re)starts from set 1 — mid-day progress (routineSetIndex)
+  // isn't persisted, so an interrupted day just restarts rather than
+  // resuming. Also used to kick off the baseline test itself (routineProgress
+  // is still null then, so routineSetIndex is simply unused until it's set).
+  const handleStartRoutineDay = () => {
+    if (exercise !== 'pushup') {
+      setExercise('pushup');
+      displacementCounterRef.current = createDisplacementCounter('pushup');
+    }
+    setRoutineSetIndex(0);
+    handleStart();
+  };
+
+  // Routine mode: called after the rest timer between sets/days finishes,
+  // or "요일 메뉴로" (back to the day screen without advancing). Advances to
+  // the next day (wrapping into next week after day 3, capped at the last
+  // week) and persists it.
+  const handleFinishRoutineDay = () => {
+    setRoutineProgress((prev) => {
+      if (prev == null) return prev;
+      const advanceWeek = prev.day >= ROUTINE_DAY_COUNT;
+      const next: RoutineProgress = {
+        ...prev,
+        day: advanceWeek ? 1 : prev.day + 1,
+        week: advanceWeek ? Math.min(ROUTINE_WEEK_COUNT, prev.week + 1) : prev.week,
+      };
+      saveRoutineProgress(next);
+      return next;
+    });
+    handleReset();
+  };
+
+  const handleChangeRoutineWeek = (delta: number) => {
+    setRoutineProgress((prev) => {
+      if (prev == null) return prev;
+      const next: RoutineProgress = { ...prev, week: Math.min(ROUTINE_WEEK_COUNT, Math.max(1, prev.week + delta)) };
+      saveRoutineProgress(next);
+      return next;
+    });
+  };
+
+  const handleSelectRoutineDay = (day: number) => {
+    setRoutineProgress((prev) => {
+      if (prev == null) return prev;
+      const next: RoutineProgress = { ...prev, day };
+      saveRoutineProgress(next);
+      return next;
+    });
+  };
+
+  // Drives the rest countdown between sets: ticks restSecondsLeft down once
+  // a second, then either starts the next set's calibration hold (same
+  // handleStart() flow as pressing 시작) or, if that was the day's last set,
+  // shows the day-complete result screen.
+  useEffect(() => {
+    if (phase !== 'resting') return;
+    if (restSecondsLeft <= 0) {
+      const progress = routineProgressRef.current;
+      const sets = progress != null ? getRoutineDaySets(progress.week, progress.day, progress.track) : [];
+      const nextIndex = routineSetIndexRef.current + 1;
+      if (progress != null && nextIndex < sets.length) {
+        setRoutineSetIndex(nextIndex);
+        handleStart();
+      } else {
+        endSession('routineDayComplete');
+      }
+      return;
+    }
+    const timer = setTimeout(() => setRestSecondsLeft((s) => s - 1), 1000);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, restSecondsLeft, endSession]);
+
   // Android hardware/gesture back button otherwise exits the app straight
   // from any screen — map it to the same "go back one level" the in-app
   // back button (topBar, below) does: camera/tracking → stage select →
@@ -655,13 +803,21 @@ export default function CameraScreen() {
         setAdventureExercise(null);
       } else if (mode === 'record' && recordSeconds != null) {
         setRecordSeconds(null);
+      } else if (mode === 'routine' && phase === 'idle') {
+        // On the baseline-intro or day-select screen (not mid-workout) —
+        // back exits routine mode entirely.
+        setMode(null);
+      } else if (mode === 'routine') {
+        // Mid-workout — handleStop() above already drops phase back to
+        // 'idle', which re-renders into the baseline-intro/day-select
+        // screen on its own; nothing else to do here.
       } else {
         setMode(null);
       }
       return true;
     });
     return () => subscription.remove();
-  }, [mode, selectedStage, adventureExercise, recordSeconds]);
+  }, [mode, phase, selectedStage, adventureExercise, recordSeconds]);
 
   if (mode == null) {
     return (
@@ -680,6 +836,19 @@ export default function CameraScreen() {
         <Pressable style={styles.modeButton} onPress={() => setMode('adventure')}>
           <Text style={styles.modeButtonTitle}>모험모드</Text>
           <Text style={styles.modeButtonDesc}>스테이지를 하나씩 깨며 성장해요</Text>
+        </Pressable>
+        <Pressable
+          style={styles.modeButton}
+          onPress={() => {
+            setMode('routine');
+            if (exercise !== 'pushup') {
+              setExercise('pushup');
+              displacementCounterRef.current = createDisplacementCounter('pushup');
+            }
+          }}
+        >
+          <Text style={styles.modeButtonTitle}>루틴모드</Text>
+          <Text style={styles.modeButtonDesc}>6주 푸시업 프로그램 · 세트와 휴식으로 진행해요</Text>
         </Pressable>
       </View>
     );
@@ -783,6 +952,83 @@ export default function CameraScreen() {
     );
   }
 
+  // Routine mode, no baseline yet, and not currently mid-test (phase !==
+  // 'idle' means the untimed baseline test is running — fall through to the
+  // shared tracking screen below instead of this intro).
+  if (mode === 'routine' && routineProgress == null && phase === 'idle') {
+    return (
+      <View style={[styles.center, { padding: 0 }]}>
+        <View style={styles.stageListTopBar}>
+          <Pressable style={styles.backButton} onPress={() => setMode(null)}>
+            <Text style={styles.backButtonText}>‹ 모드 선택</Text>
+          </Pressable>
+          <View style={styles.stageListTitleOverlay} pointerEvents="none">
+            <Text style={styles.stageListTopBarTitle}>루틴모드</Text>
+          </View>
+        </View>
+        <View style={styles.stageListContent}>
+          <Text style={styles.modeButtonDesc}>
+            먼저 정자세로 푸시업을 최대한 많이 해보세요. 개수에 따라 시작 주차와 난이도가
+            정해져요. 시간 제한은 없고, 다 하시면 "측정 종료"를 눌러주세요.
+          </Text>
+          <Pressable style={styles.button} onPress={handleStartRoutineDay}>
+            <Text style={styles.buttonText}>측정 시작</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
+
+  // Routine mode, baseline already measured, and not currently mid-workout.
+  if (mode === 'routine' && routineProgress != null && phase === 'idle') {
+    const daySets = getRoutineDaySets(routineProgress.week, routineProgress.day, routineProgress.track);
+    return (
+      <View style={[styles.center, { padding: 0 }]}>
+        <View style={styles.stageListTopBar}>
+          <Pressable style={styles.backButton} onPress={() => setMode(null)}>
+            <Text style={styles.backButtonText}>‹ 모드 선택</Text>
+          </Pressable>
+          <View style={styles.stageListTitleOverlay} pointerEvents="none">
+            <Text style={styles.stageListTopBarTitle}>
+              {routineProgress.week}주차 {routineProgress.day}일차
+            </Text>
+          </View>
+        </View>
+        <ScrollView style={styles.stageListScroll} contentContainerStyle={styles.stageListContent}>
+          <View style={styles.exerciseTabs}>
+            {[1, 2, 3].map((d) => (
+              <Pressable
+                key={d}
+                style={[styles.tab, routineProgress.day === d && styles.tabActive]}
+                onPress={() => handleSelectRoutineDay(d)}
+              >
+                <Text style={[styles.tabText, routineProgress.day === d && styles.tabTextActive]}>{d}일차</Text>
+              </Pressable>
+            ))}
+          </View>
+          <View style={styles.modeButton}>
+            {daySets.map((target, i) => (
+              <Text key={i} style={styles.modeButtonDesc}>
+                SET {i + 1}: {target}회
+              </Text>
+            ))}
+          </View>
+          <Pressable style={styles.button} onPress={handleStartRoutineDay}>
+            <Text style={styles.buttonText}>시작</Text>
+          </Pressable>
+          <View style={styles.chapterNavRow}>
+            <Pressable style={styles.chapterNavButton} onPress={() => handleChangeRoutineWeek(-1)}>
+              <Text style={styles.chapterNavButtonText}>이전주</Text>
+            </Pressable>
+            <Pressable style={styles.chapterNavButton} onPress={() => handleChangeRoutineWeek(1)}>
+              <Text style={styles.chapterNavButtonText}>다음주</Text>
+            </Pressable>
+          </View>
+        </ScrollView>
+      </View>
+    );
+  }
+
   if (!hasPermission) {
     return (
       <View style={styles.center}>
@@ -809,6 +1055,8 @@ export default function CameraScreen() {
       } else {
         resultTitle = '시간 종료... 실패';
       }
+    } else if (mode === 'routine') {
+      resultTitle = '오늘 루틴 완료!';
     } else {
       resultTitle = sessionResult.reason === 'time' ? '시간 종료!' : '레드존 초과로 탈락!';
     }
@@ -819,6 +1067,15 @@ export default function CameraScreen() {
   // the target.
   const bossHp = selectedStage != null ? Math.max(0, selectedStage.targetCount - count) : 0;
   const bossHpPercent = selectedStage != null && selectedStage.targetCount > 0 ? (bossHp / selectedStage.targetCount) * 100 : 100;
+
+  // Routine mode: this day's full set list (for the current track) and the
+  // current set's target, used for the "SET n/총n" readout and the counter
+  // card's " / N" suffix below.
+  const routineDaySets =
+    mode === 'routine' && routineProgress != null
+      ? getRoutineDaySets(routineProgress.week, routineProgress.day, routineProgress.track)
+      : [];
+  const routineTarget = routineDaySets[routineSetIndex] ?? null;
 
   return (
     <View style={styles.container}>
@@ -833,39 +1090,61 @@ export default function CameraScreen() {
               setAdventureExercise(null);
             } else if (mode === 'record' && recordSeconds != null) {
               setRecordSeconds(null);
+            } else if (mode === 'routine') {
+              // handleStop() above already drops back to the
+              // baseline-intro/day-select screen — nothing else to do.
             } else {
               setMode(null);
             }
           }}
         >
           <Text style={styles.backButtonText}>
-            ‹ {mode === 'adventure' ? selectedStage?.label ?? '모험모드' : mode != null ? MODE_LABELS[mode] : '모드'}
+            ‹{' '}
+            {mode === 'adventure'
+              ? (selectedStage?.label ?? '모험모드')
+              : mode === 'routine'
+                ? routineProgress != null
+                  ? `${routineProgress.week}주차 ${routineProgress.day}일차`
+                  : '베이스라인 측정'
+                : mode != null
+                  ? MODE_LABELS[mode]
+                  : '모드'}
           </Text>
         </Pressable>
-        <View style={styles.exerciseTabs}>
-          {/* armCurlTest is a tuning aid, not a real workout — hide it in
-              adventure mode's tab bar (record/practice can still reach it). */}
-          {(mode === 'adventure' ? EXERCISE_ORDER.filter((id) => id !== 'armCurlTest') : EXERCISE_ORDER).map(
-            (id) => (
-              <Pressable
-                key={id}
-                style={[styles.tab, exercise === id && styles.tabActive, phase !== 'idle' && styles.tabDisabled]}
-                disabled={phase !== 'idle'}
-                onPress={() => handleSelectExercise(id)}
-              >
-                <Text style={[styles.tabText, exercise === id && styles.tabTextActive]}>
-                  {EXERCISES[id].label}
-                </Text>
-              </Pressable>
-            )
-          )}
-        </View>
+        {/* Routine mode is push-up only (fixed by the program), so there's
+            no exercise to switch — the tab bar would just be misleading. */}
+        {mode !== 'routine' && (
+          <View style={styles.exerciseTabs}>
+            {/* armCurlTest is a tuning aid, not a real workout — hide it in
+                adventure mode's tab bar (record/practice can still reach it). */}
+            {(mode === 'adventure' ? EXERCISE_ORDER.filter((id) => id !== 'armCurlTest') : EXERCISE_ORDER).map(
+              (id) => (
+                <Pressable
+                  key={id}
+                  style={[styles.tab, exercise === id && styles.tabActive, phase !== 'idle' && styles.tabDisabled]}
+                  disabled={phase !== 'idle'}
+                  onPress={() => handleSelectExercise(id)}
+                >
+                  <Text style={[styles.tabText, exercise === id && styles.tabTextActive]}>
+                    {EXERCISES[id].label}
+                  </Text>
+                </Pressable>
+              )
+            )}
+          </View>
+        )}
       </View>
       {mode === 'adventure' && selectedStage != null && (
         // The stage still sets its own target count/time limit — only the
         // exercise used to reach it is now free to switch (see tabs above).
         <Text style={styles.stageInfoText}>
           {selectedStage.targetCount}회 · {selectedStage.timeLimitSec}초 안에
+        </Text>
+      )}
+      {mode === 'routine' && routineProgress != null && (
+        <Text style={styles.stageInfoText}>
+          SET {routineSetIndex + 1}/{routineDaySets.length}
+          {routineTarget != null ? ` · 목표 ${routineTarget}회` : ''}
         </Text>
       )}
 
@@ -918,6 +1197,16 @@ export default function CameraScreen() {
           </View>
         )}
 
+        {phase === 'resting' && (
+          <View style={styles.calibrationOverlay}>
+            <Text style={styles.calibrationCountdown}>{restSecondsLeft}</Text>
+            <Text style={styles.calibrationHint}>휴식 중 · 다음 세트를 준비하세요</Text>
+            <Pressable style={styles.button} onPress={() => setRestSecondsLeft(0)}>
+              <Text style={styles.buttonText}>건너뛰기</Text>
+            </Pressable>
+          </View>
+        )}
+
         {phase === 'tracking' && <ProgressGauge ref={progressGaugeRef} />}
 
         {sessionResult != null && (
@@ -926,11 +1215,20 @@ export default function CameraScreen() {
               <MonsterSprite stageId={selectedStage.id} size={96} />
             )}
             <Text style={styles.resultTitle}>{resultTitle}</Text>
-            <Text style={styles.resultStats}>
-              {sessionResult.count}
-              {mode === 'adventure' && selectedStage != null ? ` / ${selectedStage.targetCount}` : ''}회
-            </Text>
-            <Text style={styles.calibrationHint}>{sessionResult.elapsedSec}초 동안 기록</Text>
+            {mode !== 'routine' && (
+              <>
+                <Text style={styles.resultStats}>
+                  {sessionResult.count}
+                  {mode === 'adventure' && selectedStage != null ? ` / ${selectedStage.targetCount}` : ''}회
+                </Text>
+                <Text style={styles.calibrationHint}>{sessionResult.elapsedSec}초 동안 기록</Text>
+              </>
+            )}
+            {mode === 'routine' && routineProgress != null && (
+              <Text style={styles.calibrationHint}>
+                {routineProgress.week}주차 {routineProgress.day}일차 · 총 {routineDaySets.length}세트 완료
+              </Text>
+            )}
             {mode === 'adventure' ? (
               <View style={styles.controls}>
                 {sessionResult.reason === 'cleared' ? (
@@ -967,6 +1265,15 @@ export default function CameraScreen() {
                   </>
                 )}
               </View>
+            ) : mode === 'routine' ? (
+              <View style={styles.controls}>
+                <Pressable style={styles.button} onPress={handleFinishRoutineDay}>
+                  <Text style={styles.buttonText}>다음 요일로</Text>
+                </Pressable>
+                <Pressable style={[styles.button, styles.buttonSecondary]} onPress={handleReset}>
+                  <Text style={styles.buttonText}>요일 메뉴로</Text>
+                </Pressable>
+              </View>
             ) : (
               <View style={styles.controls}>
                 <Pressable style={styles.button} onPress={handleStart}>
@@ -994,6 +1301,9 @@ export default function CameraScreen() {
           {mode === 'adventure' && selectedStage != null && (
             <Text style={styles.countTarget}> / {selectedStage.targetCount}</Text>
           )}
+          {mode === 'routine' && routineTarget != null && (
+            <Text style={styles.countTarget}> / {routineTarget}</Text>
+          )}
         </Text>
         <Text style={styles.stageLabel}>
           {stage === 'down' ? exerciseConfig.downLabel : exerciseConfig.upLabel}
@@ -1004,9 +1314,15 @@ export default function CameraScreen() {
       </View>
 
       <View style={styles.controls}>
-        <Pressable style={styles.button} onPress={phase === 'idle' ? handleStart : handleStop}>
-          <Text style={styles.buttonText}>{phase === 'idle' ? '시작' : '정지'}</Text>
-        </Pressable>
+        {mode === 'routine' && routineProgress == null && phase === 'tracking' ? (
+          <Pressable style={styles.button} onPress={handleFinishBaselineTest}>
+            <Text style={styles.buttonText}>측정 종료</Text>
+          </Pressable>
+        ) : (
+          <Pressable style={styles.button} onPress={phase === 'idle' ? handleStart : handleStop}>
+            <Text style={styles.buttonText}>{phase === 'idle' ? '시작' : '정지'}</Text>
+          </Pressable>
+        )}
         <Pressable style={[styles.button, styles.buttonSecondary]} onPress={handleReset}>
           <Text style={styles.buttonText}>초기화</Text>
         </Pressable>
