@@ -12,16 +12,18 @@ export type VersusMatch = {
   winner_id: string | null;
 };
 
-/** Returns the current user's id, signing in anonymously first if needed. */
-export async function ensureAnonymousSession(): Promise<string> {
-  const { data: sessionData } = await supabase.auth.getSession();
-  if (sessionData.session != null) return sessionData.session.user.id;
-
-  const { data, error } = await supabase.auth.signInAnonymously();
+/**
+ * Returns the current user's id and display name — AuthGate guarantees a
+ * real (Google) session exists by the time any versus-mode screen is
+ * reachable, so this just reads it rather than signing in.
+ */
+export async function getCurrentPlayer(): Promise<{ id: string; name: string }> {
+  const { data, error } = await supabase.auth.getUser();
   if (error != null || data.user == null) {
-    throw new Error(error?.message ?? 'anonymous sign-in returned no user');
+    throw new Error(error?.message ?? 'no authenticated user');
   }
-  return data.user.id;
+  const name = (data.user.user_metadata?.full_name as string | undefined) ?? '상대';
+  return { id: data.user.id, name };
 }
 
 /**

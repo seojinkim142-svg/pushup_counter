@@ -1,4 +1,4 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { supabase } from './supabaseClient';
 
 export type RoutineTrack = 0 | 1 | 2;
 
@@ -283,43 +283,30 @@ export type RoutineProgress = {
   day: number;
 };
 
-const ROUTINE_PROGRESS_KEY = '@push_up_counter/routine_progress';
-
 export async function loadRoutineProgress(): Promise<RoutineProgress | null> {
-  try {
-    const raw = await AsyncStorage.getItem(ROUTINE_PROGRESS_KEY);
-    if (raw == null) return null;
-    const parsed: unknown = JSON.parse(raw);
-    if (
-      parsed != null &&
-      typeof parsed === 'object' &&
-      'baseline' in parsed &&
-      'track' in parsed &&
-      'week' in parsed &&
-      'day' in parsed
-    ) {
-      return parsed as RoutineProgress;
-    }
-    return null;
-  } catch (e) {
-    console.warn('loadRoutineProgress failed', e);
+  const { data, error } = await supabase.from('routine_progress').select('baseline,track,week,day').maybeSingle();
+  if (error != null) {
+    console.warn('loadRoutineProgress failed', error.message);
     return null;
   }
+  return data as RoutineProgress | null;
 }
 
 export async function saveRoutineProgress(progress: RoutineProgress): Promise<void> {
-  try {
-    await AsyncStorage.setItem(ROUTINE_PROGRESS_KEY, JSON.stringify(progress));
-  } catch (e) {
-    console.warn('saveRoutineProgress failed', e);
-  }
+  const { data: userData } = await supabase.auth.getUser();
+  const userId = userData.user?.id;
+  if (userId == null) return;
+  const { error } = await supabase
+    .from('routine_progress')
+    .upsert({ user_id: userId, ...progress, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+  if (error != null) console.warn('saveRoutineProgress failed', error.message);
 }
 
 /** Wipes the saved baseline/track/week/day so the baseline test runs again. */
 export async function clearRoutineProgress(): Promise<void> {
-  try {
-    await AsyncStorage.removeItem(ROUTINE_PROGRESS_KEY);
-  } catch (e) {
-    console.warn('clearRoutineProgress failed', e);
-  }
+  const { data: userData } = await supabase.auth.getUser();
+  const userId = userData.user?.id;
+  if (userId == null) return;
+  const { error } = await supabase.from('routine_progress').delete().eq('user_id', userId);
+  if (error != null) console.warn('clearRoutineProgress failed', error.message);
 }

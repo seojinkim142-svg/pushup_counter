@@ -43,7 +43,7 @@ import {
 } from '../lib/routine';
 import {
   cancelMatchmaking,
-  ensureAnonymousSession,
+  getCurrentPlayer,
   finishMatch,
   getMatch,
   startMatchmaking,
@@ -51,6 +51,7 @@ import {
   subscribeToMatch,
   updateMyCount,
 } from '../lib/versus';
+import { signOut } from '../lib/auth';
 import SkeletonOverlay, { type SkeletonOverlayHandle } from './SkeletonOverlay';
 import ProgressGauge, { type ProgressGaugeHandle } from './ProgressGauge';
 import CountdownClock from './CountdownClock';
@@ -878,7 +879,7 @@ export default function CameraScreen() {
   const handleStartVersusMatchmaking = async () => {
     setVersusSearching(true);
     try {
-      const userId = await ensureAnonymousSession();
+      const { id: userId } = await getCurrentPlayer();
       versusUserIdRef.current = userId;
       const matchId = await startMatchmaking();
       if (matchId != null) {
@@ -1020,6 +1021,9 @@ export default function CameraScreen() {
         >
           <Text style={styles.modeButtonTitle}>대결모드</Text>
           <Text style={styles.modeButtonDesc}>임의의 상대와 실시간으로 개수를 겨뤄요 (푸시업)</Text>
+        </Pressable>
+        <Pressable style={styles.backButton} onPress={signOut}>
+          <Text style={styles.backButtonText}>로그아웃</Text>
         </Pressable>
       </View>
     );

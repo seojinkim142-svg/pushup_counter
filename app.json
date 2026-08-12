@@ -2,6 +2,7 @@
   "expo": {
     "name": "push_up_counter",
     "slug": "push_up_counter",
+    "scheme": "pushupcounter",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -36,7 +37,8 @@
           "enableCodeScanner": false
         }
       ],
-      "./plugins/withMediaPipeModel.js"
+      "./plugins/withMediaPipeModel.js",
+      "expo-web-browser"
     ]
   }
 }

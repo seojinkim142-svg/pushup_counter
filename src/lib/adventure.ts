@@ -1,4 +1,4 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { supabase } from './supabaseClient';
 import type { ExerciseId } from './pose';
 
 export type StageConfig = {
@@ -238,26 +238,26 @@ export function nextStage(stage: StageConfig): StageConfig | null {
   return chain[index + 1];
 }
 
-const CLEARED_STAGES_KEY = '@push_up_counter/adventure_cleared_stages';
-
 export async function loadClearedStages(): Promise<Set<string>> {
-  try {
-    const raw = await AsyncStorage.getItem(CLEARED_STAGES_KEY);
-    if (raw == null) return new Set();
-    const ids: unknown = JSON.parse(raw);
-    return Array.isArray(ids) ? new Set(ids.filter((id): id is string => typeof id === 'string')) : new Set();
-  } catch (e) {
-    console.warn('loadClearedStages failed', e);
+  const { data, error } = await supabase.from('adventure_cleared_stages').select('stage_id');
+  if (error != null) {
+    console.warn('loadClearedStages failed', error.message);
     return new Set();
   }
+  return new Set((data as { stage_id: string }[]).map((row) => row.stage_id));
 }
 
-export async function saveClearedStage(id: string, currentlyCleared: ReadonlySet<string>): Promise<void> {
-  const next = new Set(currentlyCleared);
-  next.add(id);
-  try {
-    await AsyncStorage.setItem(CLEARED_STAGES_KEY, JSON.stringify(Array.from(next)));
-  } catch (e) {
-    console.warn('saveClearedStage failed', e);
-  }
+// currentlyCleared is unused now (kept for call-site compatibility) — the
+// server is the single source of truth, so there's nothing to merge locally.
+export async function saveClearedStage(id: string, _currentlyCleared: ReadonlySet<string>): Promise<void> {
+  const { data: userData } = await supabase.auth.getUser();
+  const userId = userData.user?.id;
+  if (userId == null) return;
+  // A stage can be cleared more than once (replaying it) — upsert with
+  // ignoreDuplicates so re-clearing an already-cleared stage isn't a unique-
+  // constraint error.
+  const { error } = await supabase
+    .from('adventure_cleared_stages')
+    .upsert({ user_id: userId, stage_id: id }, { onConflict: 'user_id,stage_id', ignoreDuplicates: true });
+  if (error != null) console.warn('saveClearedStage failed', error.message);
 }
