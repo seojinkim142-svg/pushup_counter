@@ -28,11 +28,11 @@ const CHAPTER_PROGRESSIONS: Record<ChapterExercise, StageDifficulty[]>[] = [
   {
     // Chapter 1
     pushup: [
-      { targetCount: 8, timeLimitSec: 30 },
-      { targetCount: 10, timeLimitSec: 30 },
-      { targetCount: 12, timeLimitSec: 32 },
-      { targetCount: 15, timeLimitSec: 34 },
-      { targetCount: 18, timeLimitSec: 36 },
+      { targetCount: 4, timeLimitSec: 30 },
+      { targetCount: 6, timeLimitSec: 30 },
+      { targetCount: 8, timeLimitSec: 32 },
+      { targetCount: 10, timeLimitSec: 34 },
+      { targetCount: 12, timeLimitSec: 36 },
     ],
     squat: [
       { targetCount: 8, timeLimitSec: 30 },
@@ -52,11 +52,11 @@ const CHAPTER_PROGRESSIONS: Record<ChapterExercise, StageDifficulty[]>[] = [
   {
     // Chapter 2
     pushup: [
-      { targetCount: 20, timeLimitSec: 36 },
-      { targetCount: 22, timeLimitSec: 36 },
-      { targetCount: 25, timeLimitSec: 38 },
-      { targetCount: 28, timeLimitSec: 38 },
-      { targetCount: 32, timeLimitSec: 40 },
+      { targetCount: 16, timeLimitSec: 36 },
+      { targetCount: 18, timeLimitSec: 36 },
+      { targetCount: 20, timeLimitSec: 38 },
+      { targetCount: 22, timeLimitSec: 38 },
+      { targetCount: 24, timeLimitSec: 40 },
     ],
     squat: [
       { targetCount: 25, timeLimitSec: 36 },
