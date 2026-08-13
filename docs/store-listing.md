@@ -62,9 +62,7 @@ Play Console → 앱 콘텐츠 → 데이터 보안 섹션에서 아래처럼 �
 - 제3자와 공유: 아니오
 
 **개인정보처리방침 URL**
-아래 링크를 그대로 등록하시면 됩니다 (공유 설정을 "공개"로 바꿔주셔야
-심사관이 열람 가능합니다):
-https://claude.ai/code/artifact/6103ff0c-11ab-4f8e-96c4-2a96f61c3a67
+https://seojinkim142-svg.github.io/pushup_counter/privacy-policy.html
 
 ## 그래픽 에셋 (아직 준비 안 됨, 필요시 후속 작업)
 - 아이콘: `assets/icon.png` (1024×1024) 있음 — Play는 512×512 필요,
