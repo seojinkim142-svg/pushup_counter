@@ -98,14 +98,6 @@
   strong {
     font-weight: 700;
   }
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 14px 18px;
-    margin: 10px 0;
-    max-width: 62ch;
-  }
   a {
     color: var(--accent);
   }
@@ -134,23 +126,19 @@
 
     <h3>계정 정보 (Google 로그인)</h3>
     <p>Google 계정으로 로그인하면 아래 정보를 제공받아 계정 식별과 서비스 제공에 사용합니다.</p>
-    <div class="card">
-      <ul>
-        <li>이름</li>
-        <li>이메일 주소</li>
-        <li>프로필 사진 URL</li>
-      </ul>
-    </div>
+    <ul>
+      <li>이름</li>
+      <li>이메일 주소</li>
+      <li>프로필 사진 URL</li>
+    </ul>
 
     <h3>운동 기록</h3>
     <p>로그인한 계정에 아래 정보를 저장하여 기기를 바꿔도 이어서 사용할 수 있게 합니다.</p>
-    <div class="card">
-      <ul>
-        <li>모험모드 클리어 기록</li>
-        <li>루틴모드(6주 프로그램) 진행 상황</li>
-        <li>대결모드 매칭 및 기록 (상대와의 실시간 개수 비교)</li>
-      </ul>
-    </div>
+    <ul>
+      <li>모험모드 클리어 기록</li>
+      <li>루틴모드(6주 프로그램) 진행 상황</li>
+      <li>대결모드 매칭 및 기록 (상대와의 실시간 개수 비교)</li>
+    </ul>
   </section>
 
   <section>
@@ -175,15 +163,13 @@
     </p>
 
     <h3>삭제 요청 방법</h3>
-    <div class="card">
-      <ol style="margin: 0; padding-left: 20px;">
-        <li>아래 이메일로 삭제를 요청하는 메일을 보내주세요. 제목에
-          "계정 삭제 요청"을 포함하고, 로그인에 사용한 Google 계정 이메일
-          주소를 함께 적어주세요.</li>
-        <li><a href="mailto:hestra.co@gmail.com?subject=계정%20삭제%20요청">hestra.co@gmail.com</a></li>
-        <li>확인 후 <strong>영업일 기준 7일 이내</strong>에 삭제 처리됩니다.</li>
-      </ol>
-    </div>
+    <ol style="max-width: 62ch; padding-left: 20px; margin: 8px 0;">
+      <li>아래 이메일로 삭제를 요청하는 메일을 보내주세요. 제목에
+        "계정 삭제 요청"을 포함하고, 로그인에 사용한 Google 계정 이메일
+        주소를 함께 적어주세요.</li>
+      <li><a href="mailto:hestra.co@gmail.com?subject=계정%20삭제%20요청">hestra.co@gmail.com</a></li>
+      <li>확인 후 <strong>영업일 기준 7일 이내</strong>에 삭제 처리됩니다.</li>
+    </ol>
 
     <h3>삭제되는 데이터</h3>
     <ul>
@@ -198,7 +184,7 @@
   <section>
     <h2><span class="num">5</span> 문의</h2>
     <p>개인정보 관련 문의사항은 아래로 연락해 주세요.</p>
-    <div class="card">이메일: <a href="mailto:hestra.co@gmail.com">hestra.co@gmail.com</a></div>
+    <p>이메일: <a href="mailto:hestra.co@gmail.com">hestra.co@gmail.com</a></p>
   </section>
 
   <footer>FreeFit</footer>
