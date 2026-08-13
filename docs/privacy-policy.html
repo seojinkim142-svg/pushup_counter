@@ -1,0 +1,182 @@
+<title>FreeFit Privacy Policy</title>
+<style>
+  :root {
+    --bg: #F5F8FB;
+    --surface: #FFFFFF;
+    --border: #E2E8F0;
+    --text: #0F172A;
+    --text-muted: #5B6B82;
+    --accent: #0EA5E9;
+    --accent-soft: #E0F2FE;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0B1220;
+      --surface: #121B2E;
+      --border: #223047;
+      --text: #E8EEF7;
+      --text-muted: #93A3BD;
+      --accent: #38BDF8;
+      --accent-soft: #12283A;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0B1220;
+    --surface: #121B2E;
+    --border: #223047;
+    --text: #E8EEF7;
+    --text-muted: #93A3BD;
+    --accent: #38BDF8;
+    --accent-soft: #12283A;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Pretendard", "Apple SD Gothic Neo", system-ui, sans-serif;
+    line-height: 1.65;
+  }
+  .page {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 64px 24px 96px;
+  }
+  h1 {
+    font-size: clamp(28px, 4vw, 36px);
+    font-weight: 800;
+    margin: 0 0 4px;
+    text-wrap: balance;
+  }
+  .updated {
+    color: var(--text-muted);
+    font-size: 14px;
+    margin: 0 0 40px;
+  }
+  section {
+    margin-bottom: 36px;
+    padding-bottom: 36px;
+    border-bottom: 1px solid var(--border);
+  }
+  section:last-of-type {
+    border-bottom: none;
+  }
+  h2 {
+    font-size: 19px;
+    font-weight: 700;
+    margin: 0 0 6px;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  h2 .num {
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    font-size: 14px;
+    font-weight: 700;
+  }
+  h3 {
+    font-size: 15px;
+    font-weight: 700;
+    margin: 18px 0 4px;
+    color: var(--text);
+  }
+  p {
+    max-width: 62ch;
+    color: var(--text);
+    margin: 8px 0;
+  }
+  ul {
+    max-width: 62ch;
+    margin: 8px 0;
+    padding-left: 20px;
+  }
+  li {
+    margin: 4px 0;
+  }
+  strong {
+    font-weight: 700;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 18px;
+    margin: 10px 0;
+    max-width: 62ch;
+  }
+  a {
+    color: var(--accent);
+  }
+  footer {
+    margin-top: 48px;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+</style>
+
+<div class="page">
+  <h1>FreeFit 개인정보처리방침</h1>
+  <p class="updated">최종 수정일: 2026년 8월 13일</p>
+
+  <p>FreeFit(이하 "앱")은 사용자의 개인정보를 아래와 같이 수집·이용합니다.</p>
+
+  <section>
+    <h2><span class="num">1</span> 수집하는 정보</h2>
+
+    <h3>카메라</h3>
+    <p>
+      앱은 푸시업·스쿼트 등 운동 횟수를 세기 위해 카메라를 사용합니다.
+      카메라 영상은 <strong>기기 안에서만 실시간으로 분석</strong>되며,
+      서버로 전송되거나 저장되지 않습니다.
+    </p>
+
+    <h3>계정 정보 (Google 로그인)</h3>
+    <p>Google 계정으로 로그인하면 아래 정보를 제공받아 계정 식별과 서비스 제공에 사용합니다.</p>
+    <div class="card">
+      <ul>
+        <li>이름</li>
+        <li>이메일 주소</li>
+        <li>프로필 사진 URL</li>
+      </ul>
+    </div>
+
+    <h3>운동 기록</h3>
+    <p>로그인한 계정에 아래 정보를 저장하여 기기를 바꿔도 이어서 사용할 수 있게 합니다.</p>
+    <div class="card">
+      <ul>
+        <li>모험모드 클리어 기록</li>
+        <li>루틴모드(6주 프로그램) 진행 상황</li>
+        <li>대결모드 매칭 및 기록 (상대와의 실시간 개수 비교)</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">2</span> 정보의 저장</h2>
+    <p>
+      수집된 계정 정보와 운동 기록은 데이터베이스·인증 서비스 제공업체인
+      <a href="https://supabase.com" target="_blank" rel="noopener">Supabase</a>의
+      서버에 저장됩니다. 각 사용자는 본인의 기록에만 접근할 수 있습니다.
+    </p>
+  </section>
+
+  <section>
+    <h2><span class="num">3</span> 제3자 제공</h2>
+    <p>수집된 정보를 광고, 마케팅 등의 목적으로 제3자에게 제공하거나 판매하지 않습니다.</p>
+  </section>
+
+  <section>
+    <h2><span class="num">4</span> 정보의 보관 및 삭제</h2>
+    <p>계정 삭제를 원하시는 경우 아래 문의처로 연락해 주시면 계정 및 관련 운동 기록을 삭제해 드립니다.</p>
+  </section>
+
+  <section>
+    <h2><span class="num">5</span> 문의</h2>
+    <p>개인정보 관련 문의사항은 아래로 연락해 주세요.</p>
+    <div class="card">이메일: <a href="mailto:hestra.co@gmail.com">hestra.co@gmail.com</a></div>
+  </section>
+
+  <footer>FreeFit</footer>
+</div>
