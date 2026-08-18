@@ -1,13 +1,23 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import type { Session } from '@supabase/supabase-js';
 import { signOut } from '../lib/auth';
+import { ADVENTURE_STAGES, loadClearedStages } from '../lib/adventure';
+import { loadRoutineProgress, type RoutineProgress } from '../lib/routine';
 import { ACCENT, TEXT_MUTED, TEXT_ON_ACCENT, TEXT_PRIMARY } from './theme';
 
 export default function ProfileScreen({ session, onBack }: { session: Session; onBack: () => void }) {
   const name = (session.user.user_metadata?.full_name as string | undefined) ?? '이름 없음';
   const avatarUrl = session.user.user_metadata?.avatar_url as string | undefined;
   const email = session.user.email ?? null;
+
+  const [clearedCount, setClearedCount] = useState<number | null>(null);
+  const [routineProgress, setRoutineProgress] = useState<RoutineProgress | null | undefined>(undefined);
+
+  useEffect(() => {
+    loadClearedStages().then((cleared) => setClearedCount(cleared.size));
+    loadRoutineProgress().then(setRoutineProgress);
+  }, []);
 
   return (
     <View style={styles.center}>
@@ -23,6 +33,26 @@ export default function ProfileScreen({ session, onBack }: { session: Session; o
       )}
       <Text style={styles.name}>{name}</Text>
       {email != null && <Text style={styles.email}>{email}</Text>}
+
+      <View style={styles.statsRow}>
+        <View style={styles.statBox}>
+          <Text style={styles.statValue}>
+            {clearedCount == null ? '·' : `${clearedCount} / ${ADVENTURE_STAGES.length}`}
+          </Text>
+          <Text style={styles.statLabel}>모험모드 클리어</Text>
+        </View>
+        <View style={styles.statBox}>
+          <Text style={styles.statValue}>
+            {routineProgress === undefined
+              ? '·'
+              : routineProgress == null
+                ? '미시작'
+                : `${routineProgress.week}주 ${routineProgress.day}일차`}
+          </Text>
+          <Text style={styles.statLabel}>루틴모드 진행</Text>
+        </View>
+      </View>
+
       <Pressable style={styles.button} onPress={signOut}>
         <Text style={styles.buttonText}>로그아웃</Text>
       </Pressable>
@@ -77,6 +107,31 @@ const styles = StyleSheet.create({
     color: TEXT_MUTED,
     fontSize: 14,
     marginTop: -12,
+  },
+  statsRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 8,
+  },
+  statBox: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#DBEAFE',
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    alignItems: 'center',
+    minWidth: 130,
+  },
+  statValue: {
+    color: ACCENT,
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  statLabel: {
+    color: TEXT_MUTED,
+    fontSize: 12,
+    marginTop: 4,
   },
   button: {
     backgroundColor: ACCENT,
