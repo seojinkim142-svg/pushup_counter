@@ -40,7 +40,7 @@
         }
       ],
       "./plugins/withMediaPipeModel.js",
-      "expo-web-browser"
+      "@react-native-google-signin/google-signin"
     ],
     "extra": {
       "eas": {

@@ -1,43 +1,32 @@
-import * as Linking from 'expo-linking';
-import * as WebBrowser from 'expo-web-browser';
+import { GoogleSignin } from '@react-native-google-signin/google-signin';
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from './supabaseClient';
 
-// Supabase's OAuth flow: ask for the provider's auth URL, open it in an
-// in-app browser, then parse the access/refresh tokens Supabase appends to
-// the redirect URL's fragment once Google hands control back to the app.
-const REDIRECT_TO = Linking.createURL('auth-callback');
+// Web client ID — same one already registered as the Google provider's
+// Client ID in the Supabase dashboard. GoogleSignin needs it to request an
+// idToken whose audience Supabase will accept; it does NOT need the
+// Android client's ID (that one only ties the SHA-1/package name to this
+// app so Google allows the native sign-in sheet at all).
+const WEB_CLIENT_ID = '112105991056-hoqttd1v39fl6ap1ks1dlshte7tcrsgt.apps.googleusercontent.com';
+
+GoogleSignin.configure({ webClientId: WEB_CLIENT_ID });
 
 export async function signInWithGoogle(): Promise<void> {
-  const { data, error } = await supabase.auth.signInWithOAuth({
-    provider: 'google',
-    options: { redirectTo: REDIRECT_TO, skipBrowserRedirect: true },
-  });
-  if (error != null || data.url == null) {
-    throw new Error(error?.message ?? 'no auth url returned');
+  await GoogleSignin.hasPlayServices();
+  const result = await GoogleSignin.signIn();
+  const idToken = result.data?.idToken;
+  if (idToken == null) {
+    throw new Error('Google sign-in returned no idToken');
   }
 
-  const result = await WebBrowser.openAuthSessionAsync(data.url, REDIRECT_TO);
-  if (result.type !== 'success' || result.url == null) {
-    throw new Error('google sign-in was cancelled');
-  }
-
-  // Tokens come back in the URL fragment (#access_token=...&refresh_token=...),
-  // not query params — parse it by hand since URL doesn't treat '#' as a
-  // delimiter for standard query parsing.
-  const fragment = result.url.split('#')[1] ?? '';
-  const params = new URLSearchParams(fragment);
-  const access_token = params.get('access_token');
-  const refresh_token = params.get('refresh_token');
-  if (access_token == null || refresh_token == null) {
-    throw new Error('redirect url missing tokens');
-  }
-
-  const { error: sessionError } = await supabase.auth.setSession({ access_token, refresh_token });
-  if (sessionError != null) throw new Error(sessionError.message);
+  const { error } = await supabase.auth.signInWithIdToken({ provider: 'google', token: idToken });
+  if (error != null) throw new Error(error.message);
 }
 
 export async function signOut(): Promise<void> {
+  // Also sign out of the native Google session — otherwise the next sign-in
+  // silently reuses the last account instead of showing the picker.
+  await GoogleSignin.signOut();
   await supabase.auth.signOut();
 }
 
