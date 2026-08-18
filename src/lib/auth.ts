@@ -7,7 +7,7 @@ import { supabase } from './supabaseClient';
 // idToken whose audience Supabase will accept; it does NOT need the
 // Android client's ID (that one only ties the SHA-1/package name to this
 // app so Google allows the native sign-in sheet at all).
-const WEB_CLIENT_ID = '112105991056-hoqttd1v39fl6ap1ks1dlshte7tcrsgt.apps.googleusercontent.com';
+const WEB_CLIENT_ID = '658006812029-007acjscq5nv81rl4mth49n69uvi36u8.apps.googleusercontent.com';
 
 GoogleSignin.configure({ webClientId: WEB_CLIENT_ID });
 
